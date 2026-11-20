@@ -1,0 +1,90 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.env
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Database
+*.sqlite
+*.db
+
+# Uploads and temp files
+uploads/
+temp/
+outputs/
+
+# Test data - NOT committed to git
+testdata/
+tests/data/
+*.step
+*.stp
+*.iges
+*.igs
+*.stl
+*.brep
+*.dxf
+*.dwg
+*.pdf
+*.svg
+*.png
+*.jpg
+*.jpeg
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Test coverage
+htmlcov/
+.coverage
+coverage.xml
+
+# Docker (CI only - no local docker-compose)
+docker-compose.override.yml
+
+# Flutter
+.dart_tool/
+.packages
+build/
+*.dart_tool/
+
+# Gradle cache
+.gradle/
+
+# Build outputs
+frontend/build/
+
+# Environment files (keep .env.example)
+.env.local
+.env.production
+
+# MinIO data
+minio_data/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# PyInstaller
+*.manifest
+*.spec

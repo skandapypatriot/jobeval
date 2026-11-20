@@ -1,0 +1,10 @@
+# Flutter SDK path - set this to your Flutter SDK location
+# Example (Windows):
+# flutter.sdk=C:/src/flutter
+# Example (macOS/Linux):
+# flutter.sdk=/Users/username/src/flutter
+
+# Android SDK location
+# sdk.dir=YOUR_ANDROID_SDK_PATH_HERE
+
+flutter.sdk=YOUR_FLUTTER_SDK_PATH_HERE
