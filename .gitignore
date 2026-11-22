@@ -32,7 +32,7 @@ uploads/
 temp/
 outputs/
 
-# Test data - NOT committed to git
+# Local/customer test data - NOT committed to git
 testdata/
 tests/data/
 *.step
@@ -49,15 +49,35 @@ tests/data/
 *.jpg
 *.jpeg
 
+# Small, redistributable validation fixtures are intentionally versioned.
+!fixtures/
+!fixtures/**
+!shared/fixtures/
+!shared/fixtures/**
+
+# Local runtime state
+backend/.venv/
+backend/.jobeval_data/
+backend/storage/
+backend/uploads/
+backend/outputs/
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+reports/generated/
+
 # Build artifacts
 build/
 dist/
 *.egg-info/
 
-# Test coverage
+# Test coverage and tool caches
 htmlcov/
 .coverage
 coverage.xml
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
 # Docker (CI only - no local docker-compose)
 docker-compose.override.yml
@@ -66,7 +86,15 @@ docker-compose.override.yml
 .dart_tool/
 .packages
 build/
+coverage/
 *.dart_tool/
+frontend/.flutter-plugins-dependencies
+frontend/android/local.properties
+frontend/**/ephemeral/
+frontend/**/GeneratedPluginRegistrant.*
+frontend/**/generated_plugin_registrant.*
+frontend/**/generated_plugins.cmake
+frontend/**/flutter_export_environment.sh
 
 # Gradle cache
 .gradle/
