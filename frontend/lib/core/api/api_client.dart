@@ -387,11 +387,11 @@ class ApiClient {
     String? fileName,
   }) {
     return _requestMap(
-      () => _dio.post<dynamic>(
+      () async => _dio.post<dynamic>(
         '/ocr/extract_file',
         data: FormData.fromMap({
           'file': await MultipartFile.fromFile(filePath,
-              filename: fileName ?? imagePath.split('/').last),
+              filename: fileName ?? filePath.split('/').last),
         }),
       ),
       action: 'OCR extract text from image',

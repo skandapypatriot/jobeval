@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:intl/intl.dart';
-import 'package:jobeval/core/api/api_client.dart';
 import 'package:jobeval/core/models/json_data.dart';
 import 'package:jobeval/core/models/pricing_model.dart';
 import 'package:jobeval/core/providers.dart';
@@ -19,64 +17,42 @@ class PricingScreen extends ConsumerStatefulWidget {
 
 class _PricingScreenState extends ConsumerState<PricingScreen> {
   JsonMap? _estimateOverride;
-  String? _currency;
-  int _quantity = 1;
-  double _perPieceTotal = 0.0;
 
   @override
   Widget build(BuildContext context) {
     final pricing = ref.watch(projectPricingProvider(widget.projectId));
     final estimate = ref.watch(estimateProvider(widget.projectId));
     final currentEstimate = _estimateOverride ?? estimate.valueOrNull;
-    final currency = currentEstimate != null
-        ? JsonData.text(currentEstimate['currency'], fallback: 'INR')
-        : 'INR';
-    final formatter = NumberFormat.simpleCurrency(name: currency);
 
-    // Extract per-piece info from estimate
-    final perPiece = currentEstimate != null
-        ? JsonData.firstMap(currentEstimate, const ['per_piece']) ?? {}
-        : <String, dynamic>{};
-    final perPieceCost = perPiece['total_per_piece'] as num?;
-    final machiningMinutes = perPiece['machining_minutes'] as num?;
-    final machiningHours = perPiece['machining_hours'] as num?;
-    final materialCost = perPiece['material_cost'] as num?;
-
-    // Extract finished dimensions from estimate
     final finishedBBox = currentEstimate != null
         ? JsonData.firstMap(currentEstimate, const [
             'finished_bbox',
             'finished_dimensions',
             'finished_dimensions_mm',
-          ]) ??
-          {}
+          ])
         : <String, dynamic>{};
     final finishedSize = finishedBBox['size'] as Map? ?? {};
     final finishedX = (finishedSize['x'] as num?) ?? 0.0;
     final finishedY = (finishedSize['y'] as num?) ?? 0.0;
     final finishedZ = (finishedSize['z'] as num?) ?? 0.0;
 
-    // Extract stock dimensions
     final stockDims = currentEstimate != null
         ? JsonData.firstMap(currentEstimate, const [
             'stock',
             'stock_dimensions',
             'stock_envelope',
-          ]) ??
-          {}
+          ])
         : <String, dynamic>{};
     final stockSize = stockDims['size'] as Map? ?? {};
     final stockX = (stockSize['x'] as num?) ?? 0.0;
     final stockY = (stockSize['y'] as num?) ?? 0.0;
     final stockZ = (stockSize['z'] as num?) ?? 0.0;
 
-    // Extract allowances
     final allowances = currentEstimate != null
         ? JsonData.firstMap(currentEstimate, const [
             'allowances',
             'allowance_mm',
-          ]) ??
-          {}
+          ])
         : <String, dynamic>{};
     final allowanceX = (allowances['x'] as num?) ?? 2.0;
     final allowanceY = (allowances['y'] as num?) ?? 2.0;
@@ -123,8 +99,7 @@ class _PricingScreenState extends ConsumerState<PricingScreen> {
           SectionCard(
             title: 'Stock & Finished Dimensions',
             subtitle:
-                'Finished dimensions are automatically read from CAD analysis. '
-                'Stock envelope = finished + allowance per side.',
+                'Finished dimensions are automatically read from CAD analysis. Stock envelope = finished + allowance per side.',
             leading: const Icon(Icons.inventory_2_outlined),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -224,8 +199,6 @@ class EstimateBreakdown extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final currency = JsonData.text(estimate['currency'], fallback: 'INR');
-    final formatter = NumberFormat.simpleCurrency(name: currency);
     final lines = JsonData.firstMaps(estimate, const [
       'line_items',
       'items',
@@ -236,16 +209,12 @@ class EstimateBreakdown extends StatelessWidget {
     final warnings = JsonData.strings(
       estimate['warnings'] ?? estimate['pricing_warnings'],
     );
-    final total = _firstNumber(
-      estimate,
-      const ['total', 'grand_total', 'total_cost', 'final_total'],
-    );
-    final perPiece = JsonData.firstMap(estimate, const ['per_piece']) ?? {};
-    final perPieceCost =
-        JsonData.number(perPiece['total_per_piece']);
+    final perPiece = JsonData.firstMap(estimate, const ['per_piece']);
+    final perPieceCost = perPiece['total_per_piece'] as num?;
     final machiningMinutes = perPiece['machining_minutes'] as num?;
     final machiningHours = perPiece['machining_hours'] as num?;
     final materialCost = perPiece['material_cost'] as num?;
+    final machiningCost = perPiece['machining_cost'] as num?;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -273,44 +242,41 @@ class EstimateBreakdown extends StatelessWidget {
                           if (materialCost != null)
                             _PerPieceLine(
                               label: 'Material cost',
-                              value: formatter.format(materialCost),
+                              value: materialCost,
                               icon: Icons.inventory_2_outlined,
                             ),
                           if (machiningCost != null)
                             _PerPieceLine(
                               label: 'Machining cost',
-                              value: formatter.format(machiningCost),
+                              value: machiningCost,
                               icon: Icons.factory_outlined,
                             ),
                           if (machiningHours != null)
                             _PerPieceLine(
                               label: 'Machining time',
-                              value: '${machiningHours.toStringAsFixed(2)} hours',
+                              value: machiningHours,
                               icon: Icons.access_time,
+                              suffix: ' hours',
                             ),
                           if (machiningMinutes != null)
                             _PerPieceLine(
                               label: 'Machining minutes',
-                              value: '${machiningMinutes.toStringAsFixed(1)} min',
+                              value: machiningMinutes,
                               icon: Icons.access_time,
+                              suffix: ' min',
                             ),
-                          const Divider(height: 24),
+                          const SizedBox(height: 16),
                           _PerPieceLine(
                             label: 'Per-part total',
-                            value: perPieceCost != null
-                                ? formatter.format(perPieceCost)
-                                : '–',
+                            value: perPieceCost,
                             icon: Icons.receipt_long_outlined,
                             isTotal: true,
-                          ),
-                          const SizedBox(height: 16),
-                          _QuantitySelector(
-                            quantity: 1,
-                            perPieceCost: perPieceCost,
                           ),
                         ],
                       ),
                     ),
+                  ),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: SectionCard(
                       title: 'Line items',
@@ -326,41 +292,114 @@ class EstimateBreakdown extends StatelessWidget {
                 ],
               ),
             ],
-            if (warnings.isNotEmpty) ...[
-              const SizedBox(height: 16),
-              SectionCard(
-                title: 'Warnings',
-                leading: const Icon(Icons.warning_amber_outlined,
-                    color: Colors.orange),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: warnings.map((w) => Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Icon(Icons.warning, color: Colors.orange, size: 16),
-                        const SizedBox(width: 8),
-                        Expanded(child: Text(w)),
-                      ],
-                    ),
-                  )).toList(),
-                ),
-              ),
-            ],
-          ],
+          ),
+        if (warnings.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          SectionCard(
+            title: 'Warnings',
+            leading: const Icon(Icons.warning_amber_outlined,
+                color: Colors.orange),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: warnings.map((w) {
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(Icons.warning, color: Colors.orange, size: 16),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(w),
+                      ),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
         ],
-      ),
+      ],
     );
   }
+}
 
-  double _firstNumber(JsonMap estimate, List<String> keys) {
-    for (final key in keys) {
-      final v = estimate[key];
-      if (v is num) return v.toDouble();
-      if (v is String) return double.tryParse(v);
-    }
-    return 0.0;
+class _DimensionRow extends StatelessWidget {
+  final String title;
+  final num x;
+  final num y;
+  final num z;
+  final String label;
+
+  const _DimensionRow({
+    required this.title,
+    required this.x,
+    required this.y,
+    required this.z,
+    required this.label,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: Theme.of(context).textTheme.bodyMedium,
+        ),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            Expanded(
+              child: _DimensionValue(label: 'X', value: x),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _DimensionValue(label: 'Y', value: y),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _DimensionValue(label: 'Z', value: z),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              label,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+class _DimensionValue extends StatelessWidget {
+  final String label;
+  final num value;
+
+  const _DimensionValue({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          value.toStringAsFixed(2),
+          style: Theme.of(context).textTheme.bodyMedium,
+        ),
+      ],
+    );
   }
 }
 
@@ -369,122 +408,38 @@ class _PerPieceLine extends StatelessWidget {
   final num? value;
   final IconData icon;
   final bool isTotal;
+  final String? suffix;
 
   const _PerPieceLine({
     required this.label,
     required this.value,
     required this.icon,
     this.isTotal = false,
+    this.suffix,
   });
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         children: [
-          Icon(icon, size: 16, color: theme.colorScheme.onSurfaceVariant),
-          const SizedBox(width: 8),
           Expanded(
             child: Text(
               label,
-              style: theme.textTheme.bodyMedium,
+              style: Theme.of(context).textTheme.bodyMedium,
+              overflow: TextOverflow.ellipsis,
             ),
           ),
           Text(
-            value == null ? '–' : value.toStringAsFixed(2),
-            style: theme.textTheme.bodyMedium?.copyWith(
+            value == null
+                ? '–'
+                : '${value!.toStringAsFixed(2)}${suffix ?? ''}',
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
               fontWeight: isTotal ? FontWeight.w700 : FontWeight.normal,
-              color: isTotal ? theme.colorScheme.primary : null,
+              color: isTotal ? Theme.of(context).colorScheme.primary : null,
             ),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-class _QuantitySelector extends StatelessWidget {
-  final int quantity;
-  final num? perPieceCost;
-
-  const _QuantitySelector({
-    required this.quantity,
-    required this.perPieceCost,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final currency = 'INR';
-    final formatter = NumberFormat.simpleCurrency(name: currency);
-    final total = perPieceCost != null ? perPieceCost * quantity : null;
-
-    return SectionCard(
-      title: 'Batch pricing',
-      subtitle: 'Total cost for all parts.',
-      leading: const Icon(Icons.people_outlined),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                    labelText: 'Quantity',
-                    border: OutlineInputBorder(),
-                  ),
-                  onChanged: (value) {
-                    // Quantity can be updated here
-                  },
-                ),
-              ),
-              const SizedBox(width: 12),
-              Text(
-                'Quantity: $quantity',
-                style: Theme.of(context).textTheme.bodyMedium,
-              ),
-            ),
-          ],
-          const SizedBox(height: 12),
-          if (perPieceCost != null)
-            Row(
-              children: [
-                Text(
-                  'Per-part cost: ',
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  formatter.format(perPieceCost),
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
-                    color: Theme.of(context).colorScheme.primary,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            if (total != null)
-              Row(
-                children: [
-                  Text(
-                    'Batch total: ',
-                    style: Theme.of(context).textTheme.bodyMedium,
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    formatter.format(total),
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                      color: Theme.of(context).colorScheme.primary,
-                    ),
-                  ),
-                ],
-              ),
-          ],
         ],
       ),
     );
@@ -506,7 +461,7 @@ class _LineItemRow extends StatelessWidget {
     final formula = JsonData.text(line['formula'], fallback: '');
 
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
+      padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         children: [
           Expanded(
@@ -516,8 +471,11 @@ class _LineItemRow extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
             ),
           ),
+          const SizedBox(width: 8),
           Text(
-            quantity.toStringAsFixed(quantity == quantity.toInt() ? 0 : 2),
+            quantity == quantity.toInt()
+                ? quantity.toInt().toString()
+                : quantity.toString(),
             style: Theme.of(context).textTheme.bodyMedium,
           ),
           const SizedBox(width: 8),
@@ -532,17 +490,18 @@ class _LineItemRow extends StatelessWidget {
               fontWeight: FontWeight.w700,
             ),
           ),
-          if (isOverride)
+          if (isOverride) ...[
             const SizedBox(width: 8),
-          if (isOverride)
             const Icon(Icons.edit, size: 14, color: Colors.orange),
+          ],
           const SizedBox(width: 8),
-          Text(
-            formula,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
+          if (formula.isNotEmpty)
+            Text(
+              formula,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
             ),
-          ),
         ],
       ),
     );

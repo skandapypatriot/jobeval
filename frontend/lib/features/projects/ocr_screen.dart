@@ -1,11 +1,9 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:file_picker/file_picker.dart';
-import 'package:jobeval/core/api/api_client.dart';
 import 'package:jobeval/core/providers.dart';
 import 'package:jobeval/shared/widgets/common_widgets.dart';
+import 'package:file_picker/file_picker.dart';
 
 class OcrScreen extends ConsumerStatefulWidget {
   const OcrScreen({super.key, required this.projectId});
@@ -17,17 +15,16 @@ class OcrScreen extends ConsumerStatefulWidget {
 }
 
 class _OcrScreenState extends ConsumerState<OcrScreen> {
-  bool _isUploading = false;
   bool _isProcessing = false;
   List<String> _extractedText = [];
-  List<JsonMap> _extractedDimensions = [];
+  List<Map<String, dynamic>> _extractedDimensions = [];
   String? _selectedFilePath;
   String? _selectedFileName;
   String? _ocrError;
 
   Future<void> _pickImage() async {
-    final result = await file_picker.FilePicker.platform.pickFiles(
-      type: file_picker.FileType.image,
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.image,
       allowMultiple: false,
     );
     if (result != null && result.files.isNotEmpty) {
@@ -55,14 +52,15 @@ class _OcrScreenState extends ConsumerState<OcrScreen> {
 
       setState(() {
         _extractedText = List<String>.from(response['text'] ?? []);
-        _extractedDimensions =
-            List<Map<String, dynamic>>.from(response['dimensions'] ?? []);
+        _extractedDimensions = List<Map<String, dynamic>>.from(
+          response['dimensions'] ?? [],
+        );
         _isProcessing = false;
       });
     } catch (e) {
       setState(() {
         _isProcessing = false;
-        _ocrError = apiErrorMessage(error);
+        _ocrError = apiErrorMessage(e);
       });
     }
   }
@@ -79,7 +77,7 @@ class _OcrScreenState extends ConsumerState<OcrScreen> {
                 'Upload a drawing image to extract dimensions and text using OCR.',
             actions: [
               OutlinedButton.icon(
-                onPressed: () => context.go('/projects/$projectId'),
+                onPressed: () => context.go('/projects/${widget.projectId}'),
                 icon: const Icon(Icons.arrow_back),
                 label: const Text('Back to project'),
               ),
@@ -89,7 +87,7 @@ class _OcrScreenState extends ConsumerState<OcrScreen> {
           SectionCard(
             title: 'Upload drawing image',
             subtitle:
-                'Upload a photo or scan of your engineering drawing to extract dimensions and text via OCR.',
+                'Upload a photo or scan of your engineering drawing to extract dimensions and text using OCR.',
             leading: const Icon(Icons.cloud_upload_outlined),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -106,7 +104,7 @@ class _OcrScreenState extends ConsumerState<OcrScreen> {
                 if (_selectedFileName != null) ...[
                   const SizedBox(height: 8),
                   Text(
-                    'Selected: ${_selectedFileName}',
+                    'Selected: $_selectedFileName',
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),
                   const SizedBox(height: 8),
@@ -115,7 +113,7 @@ class _OcrScreenState extends ConsumerState<OcrScreen> {
                     icon: const Icon(Icons.text_fields),
                     label: const Text('Run OCR'),
                   ),
-                ),
+                ],
                 if (_ocrError != null) ...[
                   const SizedBox(height: 8),
                   Text(
@@ -125,7 +123,7 @@ class _OcrScreenState extends ConsumerState<OcrScreen> {
                       fontSize: 12,
                     ),
                   ),
-                ),
+                ],
                 if (_extractedText.isNotEmpty) ...[
                   const SizedBox(height: 16),
                   const Text(
@@ -146,14 +144,14 @@ class _OcrScreenState extends ConsumerState<OcrScreen> {
                   ).toList(),
                 ],
               ],
-            ],
+            ),
           ),
           if (_extractedDimensions.isNotEmpty) ...[
             const SizedBox(height: 16),
             SectionCard(
               title: 'Extracted dimensions',
               subtitle: 'Dimensions automatically detected from OCR text.',
-              leading: const Icon(Icons.ruler),
+              leading: const Icon(Icons.straighten),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: _extractedDimensions.map((dim) {
@@ -163,8 +161,8 @@ class _OcrScreenState extends ConsumerState<OcrScreen> {
                       '${dim['text']} (page ${dim['page']})',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
-                  ),
-                ),
+                  );
+                }).toList(),
               ),
             ),
           ],
