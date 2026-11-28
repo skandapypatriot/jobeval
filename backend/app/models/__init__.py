@@ -2,6 +2,7 @@
 
 from app.models.jobeval import (
     AnalysisJob,
+    ChatMessage,
     CostEstimate,
     CostEstimateSnapshot,
     CrossValidation,
@@ -19,6 +20,7 @@ from app.models.jobeval import (
 __all__ = [
     "AnalysisJob",
     "CADSpecs",
+    "ChatMessage",
     "CostEstimate",
     "CostEstimateSnapshot",
     "CrossValidation",

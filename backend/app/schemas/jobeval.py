@@ -207,3 +207,31 @@ class ErrorResponse(APIModel):
     error: str
     detail: str | None = None
     request_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Chat schemas
+# ---------------------------------------------------------------------------
+
+class ChatMessageSend(APIModel):
+    message: str = Field(min_length=1, max_length=4000)
+    project_id: str | None = Field(default=None, description="Project ID for context")
+    provider: Literal["openrouter", "nvidia_nim"] | None = Field(
+        default=None,
+        description="LLM provider to use. Defaults to server LLM_PROVIDER setting.",
+    )
+
+
+class ChatMessageResponse(APIModel):
+    message_id: str
+    role: str = "assistant"
+    content: str
+    provider: str | None = None
+    model: str | None = None
+    created_at: str
+    calculations_unchanged: bool = True
+
+
+class ChatHistoryResponse(APIModel):
+    messages: list[dict[str, Any]]
+    total: int

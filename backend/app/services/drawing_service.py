@@ -3,14 +3,19 @@
 Text and vector information is extracted deterministically from the source
 file.  OCR is optional; when an OCR engine is not installed the result
 explicitly says so instead of pretending that an image was recognised.
+For scanned/raster PDFs with no embedded text, OCR can be auto-installed
+or the user can be guided to install it manually.
 """
 
 from __future__ import annotations
 
+import fitz  # type: ignore
 import re
 import shutil
 from pathlib import Path
 from typing import Any
+
+from app.services.ocr_setup import get_ocr_status, is_tesseract_available, try_auto_install
 
 _DIMENSION_PATTERNS = (
     ("diameter", re.compile(r"(?:Ø|DIAM(?:ETER)?)\s*([0-9]+(?:\.[0-9]+)?)", re.I)),
@@ -26,11 +31,14 @@ _DIMENSION_PATTERNS = (
     ),
 )
 
+# Minimum text length to consider a PDF as having embedded text (not scanned)
+_MIN_TEXT_LENGTH = 50
+
 
 class DrawingService:
     """Extract dimensions, notes, title data, and evidence from drawings."""
 
-    def __init__(self, ocr_languages: list[str] | None = None) -> None:
+    def __init__(self, ocr_languages: list[str] | None = None, auto_install_ocr: bool = True) -> None:
         from app.core.config import get_settings
 
         settings = get_settings()
@@ -39,16 +47,76 @@ class DrawingService:
             if hasattr(settings, "OCR_LANGUAGES")
             else ["en"]
         )
+        self.auto_install_ocr = auto_install_ocr
         self.ocr_available = False
         self.ocr_reason = "OCR is disabled by configuration"
-        try:
-            if shutil.which("tesseract"):
+
+        # Try to auto-install OCR if not available
+        if auto_install_ocr and not is_tesseract_available():
+            install_result = try_auto_install()
+            if install_result["installed"]:
+                self.ocr_available = True
+                self.ocr_reason = install_result.get("message", "Tesseract OCR installed automatically")
+            else:
+                self.ocr_reason = install_result.get("message", "Tesseract OCR is not installed")
+        else:
+            # Check existing availability
+            if is_tesseract_available():
                 self.ocr_available = True
                 self.ocr_reason = "Tesseract OCR is available"
             else:
                 self.ocr_reason = "Tesseract executable is not installed"
+
+        # Try to import pytesseract
+        self.pytesseract_available = False
+        try:
+            import pytesseract  # type: ignore
+
+            self.pytesseract_available = True
         except Exception:
-            self.ocr_reason = "pytesseract is not installed"
+            self.pytesseract_available = False
+
+    # ------------------------------------------------------------------
+    # OCR helpers
+    # ------------------------------------------------------------------
+
+    def _run_ocr(self, image_path: Path, language: str = "eng") -> str:
+        """Run OCR on an image file and return extracted text."""
+        if not self.ocr_available or not self.pytesseract_available:
+            return ""
+
+        try:
+            import pytesseract  # type: ignore
+
+            tesseract_path = None
+            from app.services.ocr_setup import get_tesseract_path
+
+            tesseract_path = get_tesseract_path()
+            if tesseract_path:
+                pytesseract.pytesseract.tesseract_cmd = tesseract_path
+
+            text = pytesseract.image_to_string(str(image_path), lang=language)
+            return text.strip()
+        except Exception:  # pragma: no cover - defensive
+            return ""
+
+    def _render_page_to_image(self, page, dpi: int = 300) -> Path:
+        """Render a PDF page to a PNG image for OCR processing."""
+        import tempfile
+
+        temp_dir = Path(tempfile.mkdtemp())
+        image_path = temp_dir / f"page_{page.number}.png"
+
+        # Render page at specified DPI
+        mat = fitz.Matrix(dpi / 72, dpi / 72)
+        pix = page.get_pixmap(matrix=mat)
+        pix.save(str(image_path))
+
+        return image_path
+
+    # ------------------------------------------------------------------
+    # Drawing processing
+    # ------------------------------------------------------------------
 
     def process_drawing(self, file_path: Path, project_id: str | None = None) -> dict[str, Any]:
         path = Path(file_path)
@@ -69,20 +137,27 @@ class DrawingService:
             "available": self.ocr_available,
             "reason": self.ocr_reason,
             "used": False,
+            "auto_install_attempted": self.auto_install_ocr,
         }
         return result
+
+    # ------------------------------------------------------------------
+    # BBox helper
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _bbox(box: Any) -> list[float]:
         values = [round(float(value), 3) for value in box] if box else [0.0, 0.0, 0.0, 0.0]
-        # Always return 4 values (x1, y1, x2, y2) so downstream code can index safely.
         while len(values) < 4:
             values.append(0.0)
         return values[:4]
 
-    def _parse_dimensions(
-        self, text: str, page: int, bbox: list[float], source: str
-    ) -> list[dict[str, Any]]:
+    # ------------------------------------------------------------------
+    # Dimension parsing
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_dimensions(text: str, page: int, bbox: list[float], source: str) -> list[dict[str, Any]]:
         dimensions: list[dict[str, Any]] = []
         for dimension_type, pattern in _DIMENSION_PATTERNS:
             match = pattern.search(text)
@@ -94,11 +169,7 @@ class DrawingService:
                 continue
             tolerance = None
             if len(match.groups()) > 1 and match.group(2):
-                tolerance = {
-                    "upper": float(match.group(2)),
-                    "lower": -float(match.group(2)),
-                    "text": match.group(0),
-                }
+                tolerance = {"upper": float(match.group(2)), "lower": -float(match.group(2)), "text": match.group(0)}
             dimensions.append(
                 {
                     "id": f"D-{page}-{len(dimensions):03d}",
@@ -120,15 +191,11 @@ class DrawingService:
     @staticmethod
     def _categorise_note(text: str) -> str:
         upper = text.upper()
-        if any(
-            word in upper for word in ("MATERIAL", "AL 6061", "ALUMIN", "STEEL", "BRASS", "COPPER")
-        ):
+        if any(word in upper for word in ("MATERIAL", "AL 6061", "ALUMIN", "STEEL", "BRASS", "COPPER")):
             return "material"
         if any(word in upper for word in ("FINISH", "ANOD", "PLATE", "PAINT", "COAT")):
             return "finish"
-        if any(
-            word in upper for word in ("TOLERANCE", "GD&T", "FLATNESS", "POSITION", "PERPENDICULAR")
-        ):
+        if any(word in upper for word in ("TOLERANCE", "GD&T", "FLATNESS", "POSITION", "PERPENDICULAR")):
             return "gdt_or_tolerance"
         return "general"
 
@@ -166,12 +233,8 @@ class DrawingService:
     def _title_block(self, texts: list[dict[str, Any]]) -> dict[str, Any] | None:
         if not texts:
             return None
-        # Prefer the lower/right portion of a page, but retain all text as a
-        # fallback for simple generated drawings.
         candidates = sorted(
-            texts,
-            key=lambda item: (item.get("bbox", [0, 0, 0, 0])[1], item.get("bbox", [0, 0, 0, 0])[0]),
-            reverse=True,
+            texts, key=lambda item: (item.get("bbox", [0, 0, 0, 0])[1], item.get("bbox", [0, 0, 0, 0])[0]), reverse=True
         )
         blob = " ".join(item["text"] for item in candidates)
         fields: dict[str, Any] = {}
@@ -189,12 +252,16 @@ class DrawingService:
                 fields[key] = match.group(1).strip()
         return fields or None
 
+    # ------------------------------------------------------------------
+    # PDF processing
+    # ------------------------------------------------------------------
+
     def _process_pdf(self, path: Path) -> dict[str, Any]:
         try:
-            import fitz  # type: ignore
+            document = fitz.open(str(path))
         except Exception as exc:
             raise RuntimeError("PDF parsing requires PyMuPDF (fitz)") from exc
-        document = fitz.open(str(path))
+
         pages: list[dict[str, Any]] = []
         try:
             for page_index, page in enumerate(document):
@@ -204,6 +271,8 @@ class DrawingService:
                 dimensions: list[dict[str, Any]] = []
                 notes: list[dict[str, Any]] = []
                 gdt: list[dict[str, Any]] = []
+
+                # Extract embedded text
                 for block in raw_text.get("blocks", []):
                     if block.get("type") != 0:
                         continue
@@ -231,6 +300,53 @@ class DrawingService:
                             "evidence": {"page": page_number, "bbox": bbox, "text": text},
                         }
                     )
+
+                # Check if page has embedded text or is raster-only
+                has_embedded_text = len(texts) > 0
+                total_text_length = sum(len(t["text"]) for t in texts)
+
+                # If no embedded text, try OCR if available
+                ocr_used = False
+                if not has_embedded_text or total_text_length < _MIN_TEXT_LENGTH:
+                    if self.ocr_available and self.pytesseract_available:
+                        try:
+                            image_path = self._render_page_to_image(page)
+                            ocr_text = self._run_ocr(image_path)
+                            if ocr_text:
+                                # Parse OCR text as if it were embedded text
+                                lines = [line.strip() for line in ocr_text.split("\n") if line.strip()]
+                                for line in lines:
+                                    if not line:
+                                        continue
+                                    bbox = [0, 0, 0, 0]  # No precise bbox from OCR without image_to_data
+                                    item = {"text": line, "bbox": bbox, "page": page_number, "source": "ocr_text"}
+                                    texts.append(item)
+                                    dimensions.extend(self._parse_dimensions(line, page_number, bbox, "ocr_text"))
+                                    gdt.extend(self._extract_gdt(line, page_number, bbox))
+                                    notes.append(
+                                        {
+                                            "id": f"N-OCR-{page_number}-{len(notes):03d}",
+                                            "text": line,
+                                            "category": self._categorise_note(line),
+                                            "page": page_number,
+                                            "bbox": bbox,
+                                            "source": "ocr_text",
+                                            "confidence": 0.80,  # OCR confidence is lower
+                                            "evidence": {"page": page_number, "bbox": bbox, "text": line, "source": "ocr"},
+                                        }
+                                    )
+                                ocr_used = True
+
+                                # Clean up temp image
+                                try:
+                                    image_path.unlink()
+                                    image_path.parent.rmdir()
+                                except Exception:
+                                    pass
+                        except Exception as exc:  # pragma: no cover - defensive
+                            # OCR failed, continue with whatever we have
+                            pass
+
                 vectors = []
                 for drawing in page.get_drawings():
                     vectors.append(
@@ -242,6 +358,7 @@ class DrawingService:
                             "source": "pdf_vector",
                         }
                     )
+
                 pages.append(
                     {
                         "page": page_number,
@@ -256,11 +373,18 @@ class DrawingService:
                         "vectors": vectors,
                         "title_block": self._title_block(texts),
                         "source": {"format": "pdf", "page": page_number},
+                        "has_embedded_text": has_embedded_text,
+                        "ocr_used": ocr_used,
                     }
                 )
         finally:
             document.close()
+
         return self._aggregate(pages, "pdf")
+
+    # ------------------------------------------------------------------
+    # DXF processing
+    # ------------------------------------------------------------------
 
     def _process_dxf(self, path: Path) -> dict[str, Any]:
         try:
@@ -346,8 +470,14 @@ class DrawingService:
             "vectors": vectors,
             "title_block": self._title_block(page_texts),
             "source": {"format": "dxf", "page": 1},
+            "has_embedded_text": len(page_texts) > 0,
+            "ocr_used": False,
         }
         return self._aggregate([page], "dxf")
+
+    # ------------------------------------------------------------------
+    # Aggregation
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _aggregate(pages: list[dict[str, Any]], format_name: str) -> dict[str, Any]:
@@ -356,9 +486,7 @@ class DrawingService:
         all_notes = [note for page in pages for note in page.get("notes", [])]
         all_gdt = [item for page in pages for item in page.get("gdt", [])]
         vectors = [item for page in pages for item in page.get("vectors", [])]
-        material = next(
-            (note["text"] for note in all_notes if note["category"] == "material"), None
-        )
+        material = next((note["text"] for note in all_notes if note["category"] == "material"), None)
         finish = next((note["text"] for note in all_notes if note["category"] == "finish"), None)
         title = next((page.get("title_block") for page in pages if page.get("title_block")), None)
         return {
@@ -377,7 +505,6 @@ class DrawingService:
                 "title": title,
                 "gdt": all_gdt,
             },
-            "warnings": []
-            if all_text
-            else ["No text was found; OCR may be required for scanned drawings."],
+            "warnings": [] if all_text else ["No text was found; OCR may be required for scanned drawings."],
+            "ocr_status": None,  # Will be filled by process_drawing
         }

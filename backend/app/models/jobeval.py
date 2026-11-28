@@ -211,3 +211,21 @@ JobStatus = AnalysisJob
 CADSpecs = ProjectAnalysis
 ManufacturingAnalysis = ManufacturingPlan
 CostEstimateSnapshot = CostEstimate
+
+
+class ChatMessage(Base):
+    """Chat messages for project discussions."""
+
+    __tablename__ = "chat_messages"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )

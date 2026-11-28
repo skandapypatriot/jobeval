@@ -34,6 +34,7 @@ from app.core.config import get_settings
 from app.core.database import get_db_session
 from app.models.jobeval import (
     AnalysisJob,
+    ChatMessage,
     CostEstimate,
     CrossValidation,
     DrawingAnalysis,
@@ -46,6 +47,9 @@ from app.models.jobeval import (
 )
 from app.schemas.jobeval import (
     AnalysisRequest,
+    ChatMessageResponse,
+    ChatMessageSend,
+    ChatHistoryResponse,
     CrossValidationRequest,
     DiscrepancyReviewRequest,
     DrawingParseRequest,
@@ -1097,6 +1101,211 @@ async def explain_project(
         "provider": provider,
         "provider_name": provider_name,
     }
+
+
+# ---------------------------------------------------------------------------
+# Chat
+# ---------------------------------------------------------------------------
+
+@router.post("/projects/{project_id}/chat", tags=["Chat"])
+async def chat_message(
+    project_id: str,
+    request: ChatMessageSend,
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Send a chat message and get an AI response."""
+    project = _get_project(db, project_id)
+    settings = get_settings()
+
+    # Determine provider
+    provider = request.provider or settings.LLM_PROVIDER
+    if provider == "disabled":
+        raise HTTPException(
+            status_code=503,
+            detail="LLM chat is disabled on this server",
+        )
+
+    # Select the correct API key based on provider
+    if provider == "nvidia_nim":
+        api_key = settings.NVIDIA_NIM_API_KEY
+        provider_name = "NVIDIA NIM"
+    else:
+        api_key = settings.OPENROUTER_API_KEY
+        provider_name = "OpenRouter"
+
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail=f"{provider_name} is not configured; set the corresponding API key to enable chat",
+        )
+
+    # Save user message
+    user_msg_id = str(uuid.uuid4())
+    user_msg = ChatMessage(
+        id=user_msg_id,
+        project_id=project_id,
+        role="user",
+        content=request.message,
+        provider=provider,
+        model=settings.NVIDIA_NIM_MODEL if provider == "nvidia_nim" else settings.OPENROUTER_MODEL,
+    )
+    db.add(user_msg)
+    db.flush()
+
+    # Build context summary from project data
+    analysis_row = (
+        db.execute(select(ProjectAnalysis).where(ProjectAnalysis.project_id == project_id))
+        .scalars()
+        .first()
+    )
+    plan_row = (
+        db.execute(select(ManufacturingPlan).where(ManufacturingPlan.project_id == project_id))
+        .scalars()
+        .first()
+    )
+    estimate_row = (
+        db.execute(select(CostEstimate).where(CostEstimate.project_id == project_id))
+        .scalars()
+        .first()
+    )
+
+    summary = {
+        "project_name": project.name,
+        "analysis_available": analysis_row is not None,
+        "feature_count": len((analysis_row.data if analysis_row else {}).get("features", [])),
+        "operation_count": len((plan_row.data if plan_row else {}).get("operations", [])),
+        "estimate_available": estimate_row is not None,
+        "estimate_total": (estimate_row.data if estimate_row else {}).get("total"),
+        "warnings": (plan_row.data if plan_row else {}).get("warnings", []),
+    }
+
+    system_prompt = (
+        "You are JobEval, a manufacturing cost estimation assistant. "
+        "Answer questions about CAD analysis, manufacturing plans, and cost estimates "
+        "based only on the provided project data. "
+        "Never invent dimensions, prices, or times. "
+        "If information is not available, say so clearly."
+    )
+    user_prompt = json.dumps(
+        {"question": request.message, "project_summary": summary}, sort_keys=True
+    )
+
+    llm = LLMService()
+    if provider == "nvidia_nim":
+        llm.provider = provider
+        llm.api_key = settings.NVIDIA_NIM_API_KEY
+        llm.base_url = settings.NVIDIA_NIM_BASE_URL
+        llm.model = settings.NVIDIA_NIM_MODEL
+        llm.timeout = settings.NVIDIA_NIM_TIMEOUT
+    else:
+        llm.provider = provider
+        llm.api_key = settings.OPENROUTER_API_KEY
+        llm.base_url = settings.OPENROUTER_BASE_URL
+        llm.model = settings.OPENROUTER_MODEL
+        llm.timeout = settings.OPENROUTER_TIMEOUT
+
+    try:
+        result = await llm.complete(system_prompt, user_prompt)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM request failed: {exc}") from exc
+    finally:
+        await llm.close()
+
+    # Save assistant response
+    assistant_msg_id = str(uuid.uuid4())
+    assistant_content = result.get("summary", str(result))
+    assistant_msg = ChatMessage(
+        id=assistant_msg_id,
+        project_id=project_id,
+        role="assistant",
+        content=assistant_content,
+        provider=provider,
+        model=llm.model,
+    )
+    db.add(assistant_msg)
+    db.flush()
+
+    return {
+        "message_id": assistant_msg_id,
+        "role": "assistant",
+        "content": assistant_content,
+        "provider": provider,
+        "model": llm.model,
+        "created_at": assistant_msg.created_at.isoformat(),
+        "calculations_unchanged": True,
+    }
+
+
+@router.get("/projects/{project_id}/chat", tags=["Chat"])
+async def chat_history(
+    project_id: str,
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Get chat history for a project."""
+    _get_project(db, project_id)
+    messages = (
+        db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.project_id == project_id)
+            .order_by(ChatMessage.created_at.asc())
+        )
+        .scalars()
+        .all()
+    )
+    items = [
+        {
+            "message_id": m.id,
+            "role": m.role,
+            "content": m.content,
+            "provider": m.provider,
+            "model": m.model,
+            "created_at": m.created_at.isoformat(),
+        }
+        for m in messages
+    ]
+    return {"messages": items, "total": len(items)}
+
+
+# ---------------------------------------------------------------------------
+# File Viewing
+# ---------------------------------------------------------------------------
+
+@router.get("/projects/{project_id}/files/{file_id}/view", tags=["Files"])
+async def view_file(
+    project_id: str,
+    file_id: str,
+    db: Session = Depends(get_db_session),
+) -> Response:
+    """View a project file (CAD, PDF, or image) in the browser."""
+    record = _get_file(db, file_id)
+    if record.project_id != project_id:
+        raise HTTPException(status_code=403, detail="File does not belong to this project")
+
+    settings = get_settings()
+    storage = LocalStorage()
+    try:
+        path = storage.resolve(record.relative_path)
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="The stored file is no longer available")
+
+    # Determine media type
+    ext = record.extension.lower()
+    media_type = record.mime_type
+    if ext == ".step" or ext == ".stp":
+        media_type = "application/step"
+    elif ext == ".pdf":
+        media_type = "application/pdf"
+    elif ext == ".dxf":
+        media_type = "image/vnd.dxf"
+    elif ext == ".png":
+        media_type = "image/png"
+    elif ext in {".jpg", ".jpeg"}:
+        media_type = "image/jpeg"
+
+    return FileResponse(path, media_type=media_type, filename=record.original_filename)
 
 
 # ---------------------------------------------------------------------------
