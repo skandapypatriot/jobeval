@@ -1,5 +1,11 @@
-"""LLM Integration Service - Structured prompts and response validation with OpenRouter."""
+"""LLM Integration Service - Structured prompts and response validation.
 
+Supports OpenRouter and NVIDIA NIM providers. All LLM output is validated
+against the CAD specs JSON schema - the LLM is never the authoritative
+geometry engine.
+"""
+
+import asyncio
 import hashlib
 import json
 import logging
@@ -20,24 +26,32 @@ class LLMService:
     """
     Service for LLM integration with structured prompts and response validation.
 
-    Supports OpenRouter and DeepInfra providers. All LLM output is validated
+    Supports OpenRouter and NVIDIA NIM providers. All LLM output is validated
     against the CAD specs JSON schema - the LLM is never the authoritative
     geometry engine.
     """
 
     def __init__(self) -> None:
-        self.settings = settings
-        self.provider = settings.LLM_PROVIDER
-        self.api_key = settings.LLM_API_KEY
-        self.base_url = settings.LLM_BASE_URL
-        self.model = settings.LLM_MODEL
-        self.timeout = settings.LLM_TIMEOUT
-        self.max_retries = settings.LLM_MAX_RETRIES
-        self.temperature = settings.LLM_TEMPERATURE
-        self.max_tokens = settings.LLM_MAX_TOKENS
-        self.enable_zdr = settings.ENABLE_ZERO_DATA_RETENTION
-        self.privacy_mode = settings.PRIVACY_MODE
-        self.allowed_providers = settings.ALLOWED_PROVIDERS
+        self.settings = get_settings()  # Fresh settings each instantiation
+        self.provider = self.settings.LLM_PROVIDER
+        self.max_retries = self.settings.LLM_MAX_RETRIES
+        self.temperature = self.settings.LLM_TEMPERATURE
+        self.max_tokens = self.settings.LLM_MAX_TOKENS
+        self.enable_zdr = self.settings.ENABLE_ZERO_DATA_RETENTION
+        self.privacy_mode = self.settings.PRIVACY_MODE
+        self.allowed_providers = self.settings.ALLOWED_PROVIDERS
+
+        # Select provider-specific configuration.
+        if self.provider == "nvidia_nim":
+            self.api_key = self.settings.NVIDIA_NIM_API_KEY
+            self.base_url = self.settings.NVIDIA_NIM_BASE_URL
+            self.model = self.settings.NVIDIA_NIM_MODEL
+            self.timeout = self.settings.NVIDIA_NIM_TIMEOUT
+        else:  # openrouter (default)
+            self.api_key = self.settings.OPENROUTER_API_KEY
+            self.base_url = self.settings.OPENROUTER_BASE_URL
+            self.model = self.settings.OPENROUTER_MODEL
+            self.timeout = self.settings.OPENROUTER_TIMEOUT
 
         self._client: httpx.AsyncClient | None = None
 
@@ -57,8 +71,7 @@ class LLMService:
                 if self.enable_zdr:
                     headers["X-OpenRouter-ZDR"] = "true"
 
-            # NVIDIA NIM headers
-            if self.provider == "nvidia_nim":
+            elif self.provider == "nvidia_nim":
                 if self.enable_zdr:
                     headers["NVIDIA-API-KEY"] = self.api_key or ""
 
@@ -181,7 +194,7 @@ class LLMService:
                 last_error = e
                 logger.warning(f"LLM attempt {attempt + 1} failed: {e}")
                 if attempt < self.max_retries - 1:
-                    await time.sleep(1 * (attempt + 1))  # Backoff
+                    await asyncio.sleep(1 * (attempt + 1))  # Backoff
                 continue
             except Exception as e:
                 last_error = e
@@ -381,3 +394,103 @@ Respond with JSON containing:
             sort_keys=True,
         )
         return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+    # ------------------------------------------------------------------ #
+    # Generic completion
+    # ------------------------------------------------------------------ #
+
+    async def complete(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Send a generic chat completion to the configured LLM provider.
+
+        Returns parsed JSON with validation metadata.  The LLM output is
+        advisory only - never authoritative over geometry or costing.
+        """
+        if not self.is_cloud_allowed():
+            return {
+                "error": "Cloud LLM processing not allowed in current privacy mode",
+                "analysis": None,
+                "sources": [],
+                "confidence": 0.0,
+                "warnings": ["Privacy mode blocks cloud LLM access"],
+                "provider": self.provider,
+                "model": self.model,
+            }
+
+        if not self.api_key:
+            return {
+                "error": "No LLM API key configured",
+                "analysis": None,
+                "sources": [],
+                "confidence": 0.0,
+                "warnings": ["LLM API key not set"],
+                "provider": self.provider,
+                "model": self.model,
+            }
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": temperature if temperature is not None else self.temperature,
+            "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
+            "response_format": {"type": "json_object"},
+        }
+
+        start_time = time.time()
+        last_error = None
+
+        for attempt in range(self.max_retries):
+            try:
+                client = await self._get_client()
+                response = await client.post("/chat/completions", json=payload)
+                response.raise_for_status()
+                data = response.json()
+
+                content = data["choices"][0]["message"]["content"]
+                try:
+                    parsed = json.loads(content)
+                except (TypeError, json.JSONDecodeError):
+                    parsed = {"summary": content, "risks": [], "suggestions": []}
+
+                # Add validation metadata
+                parsed["_validation"] = {
+                    "validated_by": "jobeval_llm_validator",
+                    "warnings": [],
+                    "is_advisory": True,
+                    "geometry_authoritative": True,
+                }
+                parsed["processing_time_sec"] = round(time.time() - start_time, 2)
+                parsed["provider"] = self.provider
+                parsed["model"] = self.model
+
+                return parsed
+
+            except (httpx.HTTPError, json.JSONDecodeError) as e:
+                last_error = e
+                logger.warning(f"LLM attempt {attempt + 1} failed: {e}")
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(1 * (attempt + 1))  # Backoff
+                continue
+            except Exception as e:
+                last_error = e
+                logger.exception(f"Unexpected LLM error: {e}")
+                break
+
+        return {
+            "error": str(last_error) if last_error else "Unknown error",
+            "analysis": None,
+            "sources": [],
+            "confidence": 0.0,
+            "warnings": [f"LLM analysis failed after {self.max_retries} attempts"],
+            "provider": self.provider,
+            "model": self.model,
+        }

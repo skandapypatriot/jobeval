@@ -103,6 +103,28 @@ class Settings(BaseSettings):
     OPENROUTER_MODEL: str = "openai/gpt-4o-mini"
     OPENROUTER_TIMEOUT: int = 60
 
+    # NVIDIA NIM is optional.  It is never contacted without a key.
+    NVIDIA_NIM_API_KEY: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("NVIDIA_NIM_API_KEY", "NVIDIA_API_KEY"),
+    )
+    NVIDIA_NIM_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
+    NVIDIA_NIM_MODEL: str = "nvidia/nemotron-3.5-..."
+    NVIDIA_NIM_TIMEOUT: int = 60
+
+    # Common LLM settings.  The provider is selected via LLM_PROVIDER:
+    # "openrouter", "nvidia_nim", or "disabled".
+    LLM_PROVIDER: str = Field(
+        default="openrouter",
+        validation_alias=AliasChoices("LLM_PROVIDER", "JOBEVAL_LLM_PROVIDER"),
+    )
+    LLM_MAX_RETRIES: int = 3
+    LLM_TEMPERATURE: float = 0.1
+    LLM_MAX_TOKENS: int = 8192
+    ENABLE_ZERO_DATA_RETENTION: bool = True
+    PRIVACY_MODE: str = "local"
+    ALLOWED_PROVIDERS: list[str] = Field(default_factory=lambda: ["openrouter", "nvidia_nim"])
+
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"
 

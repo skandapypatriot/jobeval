@@ -189,6 +189,10 @@ class ExplanationRequest(APIModel):
         default="Explain the manufacturing implications of this analysis.", max_length=4000
     )
     format: Literal["structured", "text"] = "structured"
+    provider: Literal["openrouter", "nvidia_nim"] | None = Field(
+        default=None,
+        description="LLM provider to use. Defaults to server LLM_PROVIDER setting.",
+    )
 
 
 class HealthResponse(APIModel):

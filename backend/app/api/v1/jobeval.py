@@ -13,7 +13,6 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -60,6 +59,7 @@ from app.schemas.jobeval import (
 )
 from app.services.cross_validation_service import CrossValidationService
 from app.services.drawing_service import DrawingService
+from app.services.llm_service import LLMService
 from app.services.manufacturing_service import ManufacturingService
 from app.services.pricing_service import PricingService
 from app.services.reports_service import build_report, report_csv, report_html, report_json
@@ -462,8 +462,14 @@ def get_job(job_id: str, db: Session = Depends(get_db_session)) -> dict[str, Any
 
 @router.get("/jobs", tags=["Analysis"])
 def list_jobs(db: Session = Depends(get_db_session)) -> dict[str, Any]:
-    jobs = list(db.execute(select(AnalysisJob).order_by(AnalysisJob.created_at.desc())).scalars().all())
-    return {"items": [_job_dict(job) for job in jobs], "jobs": [_job_dict(job) for job in jobs], "total": len(jobs)}
+    jobs = list(
+        db.execute(select(AnalysisJob).order_by(AnalysisJob.created_at.desc())).scalars().all()
+    )
+    return {
+        "items": [_job_dict(job) for job in jobs],
+        "jobs": [_job_dict(job) for job in jobs],
+        "total": len(jobs),
+    }
 
 
 @router.post("/jobs/{job_id}/cancel", tags=["Analysis"])
@@ -1011,11 +1017,29 @@ async def explain_project(
     project = _get_project(db, project_id)
     request = request or ExplanationRequest()
     settings = get_settings()
-    if not settings.OPENROUTER_API_KEY:
+
+    # Determine provider: request override > server default
+    provider = request.provider or settings.LLM_PROVIDER
+    if provider == "disabled":
         raise HTTPException(
             status_code=503,
-            detail="OpenRouter is not configured; set OPENROUTER_API_KEY to enable explanations",
+            detail="LLM explanations are disabled on this server",
         )
+
+    # Select the correct API key based on provider
+    if provider == "nvidia_nim":
+        api_key = settings.NVIDIA_NIM_API_KEY
+        provider_name = "NVIDIA NIM"
+    else:
+        api_key = settings.OPENROUTER_API_KEY
+        provider_name = "OpenRouter"
+
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail=f"{provider_name} is not configured; set the corresponding API key to enable explanations",
+        )
+
     analysis_row = (
         db.execute(select(ProjectAnalysis).where(ProjectAnalysis.project_id == project_id))
         .scalars()
@@ -1035,49 +1059,43 @@ async def explain_project(
         "operation_count": len((plan_row.data if plan_row else {}).get("operations", [])),
         "warnings": (plan_row.data if plan_row else {}).get("warnings", []),
     }
-    payload = {
-        "model": settings.OPENROUTER_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": "Explain manufacturing implications using only the supplied JSON summary. Return strict JSON with keys summary, risks, and suggestions. Never invent dimensions or change calculations.",
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {"question": request.question, "summary": summary}, sort_keys=True
-                ),
-            },
-        ],
-        "temperature": 0.1,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {
-        "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-    }
+
+    system_prompt = (
+        "Explain manufacturing implications using only the supplied JSON summary. "
+        "Return strict JSON with keys summary, risks, and suggestions. "
+        "Never invent dimensions or change calculations."
+    )
+    user_prompt = json.dumps({"question": request.question, "summary": summary}, sort_keys=True)
+
+    llm = LLMService()
+    # Override provider if the request specified one
+    if request.provider:
+        llm.provider = request.provider
+        if request.provider == "nvidia_nim":
+            llm.api_key = settings.NVIDIA_NIM_API_KEY
+            llm.base_url = settings.NVIDIA_NIM_BASE_URL
+            llm.model = settings.NVIDIA_NIM_MODEL
+            llm.timeout = settings.NVIDIA_NIM_TIMEOUT
+        else:
+            llm.api_key = settings.OPENROUTER_API_KEY
+            llm.base_url = settings.OPENROUTER_BASE_URL
+            llm.model = settings.OPENROUTER_MODEL
+            llm.timeout = settings.OPENROUTER_TIMEOUT
+
     try:
-        async with httpx.AsyncClient(timeout=settings.OPENROUTER_TIMEOUT) as client:
-            response = await client.post(
-                f"{settings.OPENROUTER_BASE_URL.rstrip('/')}/chat/completions",
-                json=payload,
-                headers=headers,
-            )
-            response.raise_for_status()
-            body = response.json()
-        content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
-        try:
-            structured = json.loads(content)
-        except (TypeError, json.JSONDecodeError):
-            structured = {"summary": content, "risks": [], "suggestions": []}
+        result = await llm.complete(system_prompt, user_prompt)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"OpenRouter request failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"LLM request failed: {exc}") from exc
+    finally:
+        await llm.close()
+
     return {
         "project_id": project_id,
-        "explanation": structured,
+        "explanation": result,
         "calculations_unchanged": True,
         "cad_sent": False,
-        "provider": "openrouter",
+        "provider": provider,
+        "provider_name": provider_name,
     }
 
 

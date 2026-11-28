@@ -109,4 +109,4 @@ The profile includes material density and price basis, selected stock blank, per
 | `GET` | `/api/v1/projects/{project_id}/reports?format=csv` | Tabular line-item export |
 | `POST` | `/api/v1/projects/{project_id}/explanation` | Optional labelled prose grounded in structured results |
 
-The explanation endpoint returns a clear unavailable response when no provider key is configured. Its output cannot mutate the estimate or any deterministic result.
+The explanation endpoint accepts an optional `provider` field in the request body (`"openrouter"` or `"nvidia_nim"`). It returns a clear unavailable response when no provider key is configured. Its output cannot mutate the estimate or any deterministic result. Original CAD binaries are never sent — only a compact structured summary.

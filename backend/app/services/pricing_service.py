@@ -498,22 +498,14 @@ class PricingService:
         # changes, and a simple complexity band based on feature evidence.
         setups = list(plan.get("setups") or [])
         setup_count = len(setups)
-        orientations = {
-            str(s.get("orientation", {}))
-            for s in setups
-            if s.get("orientation")
-        }
+        orientations = {str(s.get("orientation", {})) for s in setups if s.get("orientation")}
         orientation_changes = max(0, len(orientations) - 1)
         all_features = list((analysis or {}).get("features") or [])
         confidence_values = [
-            float(f.get("confidence", 0.0))
-            for f in all_features
-            if f.get("confidence") is not None
+            float(f.get("confidence", 0.0)) for f in all_features if f.get("confidence") is not None
         ]
         avg_confidence = (
-            sum(confidence_values) / len(confidence_values)
-            if confidence_values
-            else 0.0
+            sum(confidence_values) / len(confidence_values) if confidence_values else 0.0
         )
         if avg_confidence >= 0.8:
             complexity = "low"

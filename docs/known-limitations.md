@@ -37,4 +37,4 @@ This document describes the implementation and its honest boundaries. It must be
 
 - Web and Windows desktop are the primary development targets. Android support is architectural; device-level validation depends on the available SDK/emulator.
 - A single-process local job runner is not a durable distributed queue. Persisted job state remains inspectable after interruption, but work may need to be restarted.
-- The optional OpenRouter explanation is disabled without an API key and can only produce labelled prose. It cannot change geometry, dimensions, feature data, operations, times, prices, or confidence.
+- Optional LLM explanations (OpenRouter or NVIDIA NIM) are disabled without an API key and can only produce labelled prose. They cannot change geometry, dimensions, feature data, operations, times, prices, or confidence scores. Original CAD binaries are never sent to an LLM provider.
