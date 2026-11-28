@@ -4,7 +4,8 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import DateTime, ForeignKey, Index, String, func
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -47,9 +48,7 @@ class User(Base):
         lazy="selectin",
     )
 
-    __table_args__ = (
-        Index("idx_users_email", "email"),
-    )
+    __table_args__ = (Index("idx_users_email", "email"),)
 
 
 class APIKey(Base):
@@ -82,6 +81,4 @@ class APIKey(Base):
     # Relationships
     user: Mapped[User] = relationship("User", back_populates="api_keys")
 
-    __table_args__ = (
-        Index("idx_api_keys_user_id", "user_id"),
-    )
+    __table_args__ = (Index("idx_api_keys_user_id", "user_id"),)

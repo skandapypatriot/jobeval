@@ -1,7 +1,6 @@
 """Celery tasks for LLM integration."""
 
 import logging
-from uuid import UUID
 
 from app.core.celery_app import celery_app
 from app.services.llm_service import LLMService

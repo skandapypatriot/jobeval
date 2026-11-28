@@ -1,17 +1,22 @@
-"""JobEval Backend — Main FastAPI Application."""
+"""FastAPI application factory for the local JobEval backend."""
+
+from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from app.core.celery_app import celery_app
 from app.core.config import get_settings
-from app.core.database import db_manager
+from app.core.database import db_manager, get_db_session
 from app.core.logging import LoggingMiddleware, configure_logging, get_logger
+from app.models.jobeval import Project
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -19,142 +24,143 @@ logger = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifespan manager."""
-    # Startup
-    logger.info("starting_application", version=settings.APP_VERSION)
     configure_logging()
-
-    # Initialize database
+    settings = get_settings()
+    settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    settings.upload_root.mkdir(parents=True, exist_ok=True)
+    (settings.DATA_DIR / "tmp").mkdir(parents=True, exist_ok=True)
+    (settings.DATA_DIR / "outputs").mkdir(parents=True, exist_ok=True)
     db_manager.init()
-    await db_manager.create_tables()
-    logger.info("database_initialized")
-
-    # Initialize storage directories
-    settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    settings.TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    logger.info("storage_directories_ready")
-
-    # Verify Celery connection
+    db_manager.create_tables()
+    logger.info(
+        "application_started", database=settings.database_url, upload_dir=str(settings.upload_root)
+    )
     try:
-        celery_app.control.ping(timeout=5)
-        logger.info("celery_broker_connected")
-    except Exception as e:
-        logger.warning("celery_broker_unavailable", error=str(e))
-
-    logger.info("application_started")
-
-    yield
-
-    # Shutdown
-    logger.info("shutting_down_application")
-    await db_manager.close()
-    logger.info("application_stopped")
+        yield
+    finally:
+        db_manager.close()
+        logger.info("application_stopped")
 
 
 def create_app() -> FastAPI:
-    """Create and configure the FastAPI application."""
     app = FastAPI(
         title="JobEval API",
-        description="Intelligent CAD Analysis & CNC Cost Estimation",
-        version=settings.APP_VERSION,
-        docs_url="/docs" if settings.DEBUG else None,
-        redoc_url="/redoc" if settings.DEBUG else None,
-        openapi_url="/openapi.json" if settings.DEBUG else None,
+        description="Local CAD geometry, manufacturing planning, and transparent cost estimation.",
+        version=get_settings().APP_VERSION,
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json",
         lifespan=lifespan,
     )
 
-    # CORS
+    origins = get_settings().CORS_ORIGINS
+    allow_credentials = get_settings().CORS_ALLOW_CREDENTIALS and "*" not in origins
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.CORS_ORIGINS,
-        allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
-        allow_methods=settings.CORS_ALLOW_METHODS,
-        allow_headers=settings.CORS_ALLOW_HEADERS,
+        allow_origins=origins,
+        allow_credentials=allow_credentials,
+        allow_methods=get_settings().CORS_ALLOW_METHODS,
+        allow_headers=get_settings().CORS_ALLOW_HEADERS,
     )
-
-    # Request logging middleware
     app.add_middleware(LoggingMiddleware)
 
-    # Request ID middleware
     @app.middleware("http")
-    async def add_request_id(request: Request, call_next):
-        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4())[:8])
+    async def request_id_middleware(request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
         request.state.request_id = request_id
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
         return response
 
-    # Global exception handler
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(request: Request, exc: RequestValidationError):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "Validation error",
+                "detail": "The request did not match the JobEval API contract.",
+                "errors": exc.errors(),
+                "request_id": getattr(request.state, "request_id", None),
+            },
+        )
+
+    @app.exception_handler(HTTPException)
+    async def http_error_handler(request: Request, exc: HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": "Request failed",
+                "detail": exc.detail,
+                "request_id": getattr(request.state, "request_id", None),
+            },
+            headers=exc.headers,
+        )
+
     @app.exception_handler(Exception)
-    async def global_exception_handler(request: Request, exc: Exception):
+    async def unhandled_error_handler(request: Request, exc: Exception):
         logger.exception(
-            "unhandled_exception",
-            path=request.url.path,
-            method=request.method,
-            error=str(exc),
+            "unhandled_exception", path=request.url.path, method=request.method, error=str(exc)
         )
         return JSONResponse(
             status_code=500,
             content={
                 "error": "Internal server error",
-                "request_id": getattr(request.state, "request_id", "unknown"),
+                "detail": "The local backend could not complete the request.",
+                "request_id": getattr(request.state, "request_id", None),
             },
         )
 
-    # Health check endpoints
     @app.get("/health", tags=["Health"])
-    async def health_check():
-        """Basic health check."""
-        return {"status": "healthy", "version": settings.APP_VERSION}
-
-    @app.get("/health/ready", tags=["Health"])
-    async def readiness_check():
-        """Readiness check with dependencies."""
-        checks = {}
-
-        # Database
+    def health() -> dict[str, str]:
+        settings = get_settings()
+        database = "ok"
+        storage = "ok"
         try:
-            async with db_manager.session() as session:
-                await session.execute("SELECT 1")
-            checks["database"] = "ok"
-        except Exception as e:
-            checks["database"] = f"error: {e}"
-
-        # Redis/Celery
+            db_manager.init()
+            with db_manager.session() as session:
+                session.execute(select(Project).limit(1)).first()
+        except Exception as exc:  # pragma: no cover - depends on environment
+            database = f"error: {exc}"
         try:
-            celery_app.control.ping(timeout=2)
-            checks["celery"] = "ok"
-        except Exception as e:
-            checks["celery"] = f"error: {e}"
+            upload_root = settings.upload_root
+            upload_root.mkdir(parents=True, exist_ok=True)
+            probe = upload_root / ".jobeval_health_probe"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+        except Exception as exc:  # pragma: no cover - depends on environment
+            storage = f"error: {exc}"
+        overall = "healthy" if database == "ok" and storage == "ok" else "degraded"
+        return {
+            "status": overall,
+            "service": "jobeval-backend",
+            "version": get_settings().APP_VERSION,
+            "database": database,
+            "storage": storage,
+        }
 
-        # Storage
-        try:
-            settings.UPLOAD_DIR.mkdir(exist_ok=True)
-            checks["storage"] = "ok"
-        except Exception as e:
-            checks["storage"] = f"error: {e}"
+    @app.get("/api/v1/health", tags=["Health"])
+    def api_health() -> dict[str, str]:
+        return health()
 
-        all_healthy = all(v == "ok" for v in checks.values())
-        status_code = 200 if all_healthy else 503
-
-        return JSONResponse(
-            status_code=status_code,
-            content={"status": "ready" if all_healthy else "not_ready", "checks": checks},
-        )
-
-    # API routes
     from app.api import router as api_router
-    app.include_router(api_router, prefix=settings.API_PREFIX)
+
+    app.include_router(api_router, prefix=get_settings().API_PREFIX)
+
+    # A root dashboard alias is convenient for local clients; the canonical
+    # versioned endpoint remains /api/v1/dashboard.
+    from app.api.v1.jobeval import dashboard
+
+    @app.get("/dashboard", include_in_schema=False)
+    def dashboard_alias(db: Session = Depends(get_db_session)):
+        return dashboard(db)
 
     @app.get("/", tags=["Root"])
-    async def root():
-        """API root endpoint."""
+    def root() -> dict[str, str]:
         return {
-            "name": settings.APP_NAME,
-            "version": settings.APP_VERSION,
-            "description": "Intelligent CAD Analysis & CNC Cost Estimation",
-            "docs": "/docs" if settings.DEBUG else "disabled",
+            "name": get_settings().APP_NAME,
+            "version": get_settings().APP_VERSION,
+            "docs": "/docs",
+            "openapi": "/openapi.json",
         }
 
     return app
@@ -165,10 +171,5 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "app.main:app",
-        host=settings.HOST,
-        port=settings.PORT,
-        reload=settings.DEBUG,
-        workers=settings.WORKERS if not settings.DEBUG else 1,
-    )
+
+    uvicorn.run("app.main:app", host=get_settings().HOST, port=get_settings().PORT)

@@ -1,20 +1,40 @@
-"""SQLAlchemy models for JobEval."""
+"""JobEval persistence models."""
 
-from app.models.project import Project, ProjectFile, JobStatus
-from app.models.cad_specs import CADSpecs, ManufacturingAnalysis, CostEstimate, Report
-from app.models.material import Material, MaterialPricing
-from app.models.user import User, APIKey
+from app.models.jobeval import (
+    AnalysisJob,
+    ChatMessage,
+    CostEstimate,
+    CostEstimateSnapshot,
+    CrossValidation,
+    DrawingAnalysis,
+    JobStatus,
+    ManufacturingAnalysis,
+    ManufacturingPlan,
+    PricingConfig,
+    Project,
+    ProjectAnalysis,
+    ProjectFile,
+    ReportRecord,
+)
 
 __all__ = [
-    "Project",
-    "ProjectFile",
-    "JobStatus",
+    "AnalysisJob",
     "CADSpecs",
-    "ManufacturingAnalysis",
+    "ChatMessage",
     "CostEstimate",
-    "Report",
-    "Material",
-    "MaterialPricing",
-    "User",
-    "APIKey",
+    "CostEstimateSnapshot",
+    "CrossValidation",
+    "DrawingAnalysis",
+    "JobStatus",
+    "ManufacturingAnalysis",
+    "ManufacturingPlan",
+    "PricingConfig",
+    "Project",
+    "ProjectAnalysis",
+    "ProjectFile",
+    "ReportRecord",
 ]
+
+# Keep the old public name available without importing the PostgreSQL-specific
+# scaffold models.
+CADSpecs = ProjectAnalysis

@@ -2,26 +2,25 @@
 
 from typing import Any
 
-from OCP.BRep import BRep_Tool
-from OCP.BRepAdaptor import BRepAdaptor_Surface, BRepAdaptor_Curve
-from OCP.BRepGProp import BRepGProp
-from OCP.GProp import GProp_GProps
-from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_WIRE
-from OCP.TopExp import TopExp_Explorer
-from OCP.TopoDS import TopoDS_Shape, TopoDS
-from OCP.gp import gp_Pnt, gp_Vec
 from OCP.Bnd import Bnd_Box
+from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
 from OCP.BRepBndLib import BRepBndLib
+from OCP.BRepGProp import BRepGProp
 from OCP.GeomAbs import (
-    GeomAbs_Cylinder,
-    GeomAbs_Plane,
-    GeomAbs_Cone,
-    GeomAbs_Sphere,
-    GeomAbs_Torus,
     GeomAbs_BezierSurface,
     GeomAbs_BSplineSurface,
+    GeomAbs_Cone,
+    GeomAbs_Cylinder,
     GeomAbs_OtherSurface,
+    GeomAbs_Plane,
+    GeomAbs_Sphere,
+    GeomAbs_Torus,
 )
+from OCP.gp import gp_Pnt, gp_Vec
+from OCP.GProp import GProp_GProps
+from OCP.TopAbs import TopAbs_WIRE
+from OCP.TopExp import TopExp_Explorer
+from OCP.TopoDS import TopoDS, TopoDS_Shape
 
 from app.schemas.cad_specs import BoundingBox3D, Vector3D
 
@@ -159,7 +158,9 @@ def identify_units(shape: TopoDS_Shape) -> Any:
         source=source,
         normalized=UnitSystem.MM,
         confidence=0.7,
-        conversion_factor=1.0 if source == UnitSystem.MM else (25.4 if source == UnitSystem.INCH else 10.0),
+        conversion_factor=1.0
+        if source == UnitSystem.MM
+        else (25.4 if source == UnitSystem.INCH else 10.0),
     )
 
 

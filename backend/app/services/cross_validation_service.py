@@ -1,343 +1,278 @@
-"""Cross-Validation Service - Compare 3D model with 2D drawing annotations."""
+"""Cross-validation between drawing evidence and the STEP model."""
 
-import logging
+from __future__ import annotations
+
 from typing import Any
-from uuid import UUID
-
-from app.core.config import get_settings
-from app.schemas.cad_specs import (
-    CrossValidationCheck,
-    CrossValidationReport,
-    DrawingAnnotations,
-    GeometrySummary,
-    ValidationStatus,
-)
-
-settings = get_settings()
-logger = logging.getLogger(__name__)
 
 
 class CrossValidationService:
-    """Service for comparing 3D model data with 2D drawing annotations."""
+    """Compare dimensions, hole counts/diameters, and material explicitly."""
 
-    def __init__(self) -> None:
-        self.settings = settings
-        self.dimension_tolerance_mm = 0.5  # Default tolerance for dimension matching
-        self.hole_count_tolerance = 0
+    DEFAULT_TOLERANCES = {
+        "dimension_mm": 0.5,
+        "hole_diameter_mm": 0.1,
+        "count": 0,
+        "material": 0.0,
+    }
+
+    def __init__(self, tolerances: dict[str, float] | None = None) -> None:
+        self.tolerances = dict(self.DEFAULT_TOLERANCES)
+        if tolerances:
+            self.tolerances.update(tolerances)
+
+    @staticmethod
+    def _dimensions(drawings: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not drawings:
+            return []
+        return list(drawings.get("dimensions") or [])
+
+    @staticmethod
+    def _features(analysis: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not analysis:
+            return []
+        reviewed = analysis.get("reviewed_features") or {}
+        if isinstance(reviewed, dict) and reviewed:
+            return list(reviewed.values())
+        return list(analysis.get("features") or analysis.get("raw_features") or [])
+
+    @staticmethod
+    def _bbox_size(analysis: dict[str, Any] | None) -> dict[str, float]:
+        geometry = (
+            (analysis or {}).get("geometry") or (analysis or {}).get("geometry_summary") or {}
+        )
+        bbox = geometry.get("bbox") or {}
+        low, high = bbox.get("min", {}), bbox.get("max", {})
+        return {
+            "length": float(high.get("x", 0) - low.get("x", 0)),
+            "width": float(high.get("y", 0) - low.get("y", 0)),
+            "height": float(high.get("z", 0) - low.get("z", 0)),
+        }
+
+    def _drawing_dimension(
+        self,
+        dimensions: list[dict[str, Any]],
+        name: str,
+        exclude_ids: set[str] | None = None,
+    ) -> dict[str, Any] | None:
+        aliases = {
+            "length": ("length", "overall length", "o/all length", "x"),
+            "width": ("width", "overall width", "o/all width", "y"),
+            "height": ("height", "overall height", "o/all height", "thickness", "z"),
+        }
+        exclude_ids = exclude_ids or set()
+        for dimension in dimensions:
+            dim_id = dimension.get("id", "")
+            if dim_id in exclude_ids:
+                continue
+            text = str(dimension.get("text", "")).lower()
+            if any(alias in text for alias in aliases[name]):
+                return dimension
+        # Generated drawings often use a single numeric dimension.  Only use
+        # the closest numeric candidate, and mark it as an inference in the
+        # check details rather than pretending it was labelled.
+        numeric = [
+            d
+            for d in dimensions
+            if d.get("type") == "linear"
+            and d.get("value") is not None
+            and d.get("id", "") not in exclude_ids
+        ]
+        if not numeric:
+            return None
+        return max(numeric, key=lambda d: float(d["value"]))
 
     def validate(
         self,
-        drawing_annotations: DrawingAnnotations | None,
-        geometry_summary: GeometrySummary | None,
-        model_features: list[Any],
+        drawing_annotations: dict[str, Any] | None,
+        analysis: dict[str, Any] | None,
         model_material: str | None = None,
-    ) -> CrossValidationReport:
-        """
-        Compare drawing annotations with 3D model features.
-        Never assumes either source is correct - flags all discrepancies.
-        """
-        checks: list[CrossValidationCheck] = []
-        summary = {
-            "matches": 0,
-            "mismatches": 0,
-            "drawing_only": 0,
-            "model_only": 0,
-            "within_tolerance": 0,
-        }
+    ) -> dict[str, Any]:
+        dimensions = self._dimensions(drawing_annotations)
+        features = self._features(analysis)
+        bbox = self._bbox_size(analysis)
+        checks: list[dict[str, Any]] = []
+        summary = {"match": 0, "mismatch": 0, "drawing_only": 0, "model_only": 0, "needs_review": 0}
+        used_dimension_ids: set[str] = set()
 
-        # Extract drawing data
-        drawing_dims = self._get_all_dimensions(drawing_annotations) if drawing_annotations else []
-        drawing_holes = self._count_drawing_holes(drawing_dims)
-        drawing_material = self._extract_drawing_material(drawing_annotations) if drawing_annotations else None
-        drawing_tolerances = self._extract_drawing_tolerances(drawing_annotations) if drawing_annotations else []
+        def add(
+            property_name: str,
+            drawing: Any,
+            model: Any,
+            status: str,
+            tolerance: float,
+            details: str,
+            review_state: str = "unreviewed",
+        ) -> None:
+            checks.append(
+                {
+                    "id": f"CV-{len(checks) + 1:03d}",
+                    "property": property_name,
+                    "drawing": drawing,
+                    "model": model,
+                    "status": status,
+                    "tolerance": tolerance,
+                    "details": details,
+                    "review_state": review_state,
+                    "reviewer": None,
+                    "note": None,
+                }
+            )
+            summary[status] = summary.get(status, 0) + 1
 
-        # Extract model data
-        model_dims = self._extract_model_dimensions(geometry_summary) if geometry_summary else {}
-        model_holes = self._count_model_holes(model_features)
-        model_material = model_material
+        tolerance = float(self.tolerances.get("dimension_mm", 0.5))
+        for name in ("length", "width", "height"):
+            drawing_dimension = self._drawing_dimension(
+                dimensions, name, exclude_ids=used_dimension_ids
+            )
+            if drawing_dimension is not None:
+                used_dimension_ids.add(drawing_dimension.get("id", ""))
+            model_value = bbox.get(name)
+            drawing_value = drawing_dimension.get("value") if drawing_dimension else None
+            if drawing_value is not None and model_value:
+                difference = abs(float(drawing_value) - float(model_value))
+                status = "match" if difference <= tolerance else "mismatch"
+                add(
+                    f"overall_{name}",
+                    round(float(drawing_value), 4),
+                    round(float(model_value), 4),
+                    status,
+                    tolerance,
+                    f"Drawing {drawing_value} mm, model {model_value:.4f} mm, difference {difference:.4f} mm.",
+                )
+            elif drawing_value is not None:
+                add(
+                    f"overall_{name}",
+                    drawing_value,
+                    None,
+                    "drawing_only",
+                    tolerance,
+                    "Dimension appears on the drawing but not in the model.",
+                )
+            elif model_value:
+                add(
+                    f"overall_{name}",
+                    None,
+                    round(float(model_value), 4),
+                    "model_only",
+                    tolerance,
+                    "Dimension appears in the model but not on the drawing.",
+                )
 
-        # =====================================================================
-        # 1. Overall Dimensions Comparison
-        # =====================================================================
-        for dim_name in ["length", "width", "height", "volume"]:
-            model_val = model_dims.get(dim_name)
-            drawing_val = self._find_drawing_dimension(drawing_dims, dim_name)
-
-            if model_val is not None and drawing_val is not None:
-                diff = abs(model_val - drawing_val)
-                if dim_name == "volume":
-                    # Volume tolerance is relative (5%)
-                    tolerance = abs(model_val) * 0.05
-                    status = ValidationStatus.MATCH if diff <= tolerance else ValidationStatus.MISMATCH
-                else:
-                    status = ValidationStatus.MATCH if diff <= self.dimension_tolerance_mm else ValidationStatus.MISMATCH
-
-                if status == ValidationStatus.MATCH:
-                    summary["matches"] += 1
-                else:
-                    summary["mismatches"] += 1
-
-                checks.append(CrossValidationCheck(
-                    property=f"overall_{dim_name}",
-                    drawing=round(drawing_val, 3) if drawing_val else None,
-                    model=round(model_val, 3) if model_val else None,
-                    status=status,
-                    tolerance=self.dimension_tolerance_mm if dim_name != "volume" else tolerance,
-                    details=f"Drawing: {drawing_val}, Model: {model_val}, diff: {diff:.3f}",
-                ))
-            elif drawing_val is not None and model_val is None:
-                summary["drawing_only"] += 1
-                checks.append(CrossValidationCheck(
-                    property=f"overall_{dim_name}",
-                    drawing=round(drawing_val, 3),
-                    model=None,
-                    status=ValidationStatus.DRAWING_ONLY,
-                    details="Dimension found on drawing but not in model",
-                ))
-            elif model_val is not None and drawing_val is None:
-                summary["model_only"] += 1
-                checks.append(CrossValidationCheck(
-                    property=f"overall_{dim_name}",
-                    drawing=None,
-                    model=round(model_val, 3),
-                    status=ValidationStatus.MODEL_ONLY,
-                    details="Dimension found in model but not on drawing",
-                ))
-
-        # =====================================================================
-        # 2. Hole Count Comparison
-        # =====================================================================
-        if drawing_holes > 0 or model_holes > 0:
-            if drawing_holes == model_holes:
-                summary["matches"] += 1
-                status = ValidationStatus.MATCH
-            else:
-                summary["mismatches"] += 1
-                status = ValidationStatus.MISMATCH
-
-            checks.append(CrossValidationCheck(
-                property="hole_count",
-                drawing=drawing_holes,
-                model=model_holes,
-                status=status,
-                details=f"Drawing: {drawing_holes} holes, Model: {model_holes} holes",
-            ))
-
-        # =====================================================================
-        # 3. Hole Diameter Comparison (sample first few)
-        # =====================================================================
-        drawing_diameters = [
-            d for d in drawing_dims
-            if d.type in ("diameter", "thread")
+        drawing_holes = [d for d in dimensions if d.get("type") in {"diameter", "thread"}]
+        model_holes = [
+            f
+            for f in features
+            if f.get("type")
+            in {
+                "through_hole",
+                "blind_hole",
+                "counterbore",
+                "countersink",
+                "tapped_hole_candidate",
+                "reamed_hole_candidate",
+            }
         ]
-        model_diameters = [
-            f for f in model_features
-            if f.type in ("through_hole", "blind_hole", "counterbore", "countersink", "cylindrical_bore")
-            and f.dimensions and f.dimensions.diameter
-        ]
+        if drawing_holes or model_holes:
+            difference = abs(len(drawing_holes) - len(model_holes))
+            count_tolerance = int(self.tolerances.get("count", 0))
+            add(
+                "hole_count",
+                len(drawing_holes),
+                len(model_holes),
+                "match" if difference <= count_tolerance else "mismatch",
+                count_tolerance,
+                f"Drawing shows {len(drawing_holes)} hole callouts; model has {len(model_holes)} hole features.",
+            )
 
-        # Compare up to 5 hole diameters
-        for i in range(min(5, len(drawing_diameters), len(model_diameters))):
-            dd = drawing_diameters[i]
-            mf = model_diameters[i]
-            md = mf.dimensions.diameter if mf.dimensions else None
-
-            if dd.value is not None and md is not None:
-                diff = abs(dd.value - md)
-                status = ValidationStatus.MATCH if diff <= 0.1 else ValidationStatus.MISMATCH
-                if status == ValidationStatus.MATCH:
-                    summary["matches"] += 1
-                else:
-                    summary["mismatches"] += 1
-
-                checks.append(CrossValidationCheck(
-                    property=f"hole_diameter_{i+1}",
-                    drawing=dd.value,
-                    model=round(md, 3),
-                    status=status,
-                    tolerance=0.1,
-                    details=f"Drawing: Ø{dd.value}, Model: Ø{md}, diff: {diff:.3f}",
-                ))
-
-        # Extra drawing holes not in model
+        diameter_tolerance = float(self.tolerances.get("hole_diameter_mm", 0.1))
+        drawing_diameters = sorted(
+            float(d["value"]) for d in drawing_holes if d.get("value") is not None
+        )
+        model_diameters = sorted(
+            float((f.get("dimensions") or {}).get("diameter"))
+            for f in model_holes
+            if (f.get("dimensions") or {}).get("diameter") is not None
+        )
+        for index in range(min(len(drawing_diameters), len(model_diameters))):
+            difference = abs(drawing_diameters[index] - model_diameters[index])
+            add(
+                f"hole_diameter_{index + 1}",
+                round(drawing_diameters[index], 4),
+                round(model_diameters[index], 4),
+                "match" if difference <= diameter_tolerance else "mismatch",
+                diameter_tolerance,
+                f"Diameter difference {difference:.4f} mm.",
+            )
         if len(drawing_diameters) > len(model_diameters):
-            summary["drawing_only"] += 1
-            checks.append(CrossValidationCheck(
-                property="hole_count_extra_drawing",
-                drawing=len(drawing_diameters),
-                model=len(model_diameters),
-                status=ValidationStatus.DRAWING_ONLY,
-                details=f"Drawing has {len(drawing_diameters) - len(model_diameters)} more hole dimensions than model features",
-            ))
-
-        # Extra model holes not in drawing
+            add(
+                "hole_diameter_count",
+                len(drawing_diameters),
+                len(model_diameters),
+                "drawing_only",
+                0,
+                "Drawing has more hole diameter callouts than the model.",
+            )
         if len(model_diameters) > len(drawing_diameters):
-            summary["model_only"] += 1
-            checks.append(CrossValidationCheck(
-                property="hole_count_extra_model",
-                drawing=len(drawing_diameters),
-                model=len(model_diameters),
-                status=ValidationStatus.MODEL_ONLY,
-                details=f"Model has {len(model_diameters) - len(drawing_diameters)} more hole features than drawing dimensions",
-            ))
+            add(
+                "hole_diameter_count",
+                len(drawing_diameters),
+                len(model_diameters),
+                "model_only",
+                0,
+                "Model has more hole features than the drawing.",
+            )
 
-        # =====================================================================
-        # 4. Material Comparison
-        # =====================================================================
+        drawing_material = (
+            (drawing_annotations or {}).get("candidates", {}).get("material")
+            if drawing_annotations
+            else None
+        )
         if drawing_material or model_material:
             if drawing_material and model_material:
-                if drawing_material.lower().strip() == model_material.lower().strip():
-                    summary["matches"] += 1
-                    status = ValidationStatus.MATCH
-                else:
-                    summary["mismatches"] += 1
-                    status = ValidationStatus.MISMATCH
-                checks.append(CrossValidationCheck(
-                    property="material",
-                    drawing=drawing_material,
-                    model=model_material,
-                    status=status,
-                    details=f"Drawing: {drawing_material}, Model: {model_material}",
-                ))
-            elif drawing_material and not model_material:
-                summary["drawing_only"] += 1
-                checks.append(CrossValidationCheck(
-                    property="material",
-                    drawing=drawing_material,
-                    model=None,
-                    status=ValidationStatus.DRAWING_ONLY,
-                    details="Material specified on drawing but not in model",
-                ))
-            elif model_material and not drawing_material:
-                summary["model_only"] += 1
-                checks.append(CrossValidationCheck(
-                    property="material",
-                    drawing=None,
-                    model=model_material,
-                    status=ValidationStatus.MODEL_ONLY,
-                    details="Material specified in model but not on drawing",
-                ))
+                same = str(drawing_material).strip().lower() == str(model_material).strip().lower()
+                add(
+                    "material",
+                    drawing_material,
+                    model_material,
+                    "match" if same else "mismatch",
+                    0,
+                    "Material names were compared exactly after trimming.",
+                )
+            elif drawing_material:
+                add(
+                    "material",
+                    drawing_material,
+                    None,
+                    "drawing_only",
+                    0,
+                    "Material is specified on the drawing only.",
+                )
+            else:
+                add(
+                    "material",
+                    None,
+                    model_material,
+                    "model_only",
+                    0,
+                    "Material is present in the model only.",
+                )
 
-        # =====================================================================
-        # 5. Tolerance Comparison
-        # =====================================================================
-        if drawing_tolerances:
-            # Model typically doesn't carry tolerance info in STEP
-            summary["drawing_only"] += 1
-            checks.append(CrossValidationCheck(
-                property="tolerances",
-                drawing=f"{len(drawing_tolerances)} tolerance(s) found",
-                model=None,
-                status=ValidationStatus.DRAWING_ONLY,
-                details="Tolerances found on drawing but STEP models typically don't carry tolerance data",
-            ))
+        tolerances = [d for d in dimensions if d.get("tolerance")]
+        if tolerances:
+            add(
+                "drawing_tolerances",
+                len(tolerances),
+                None,
+                "drawing_only",
+                0,
+                "STEP geometry does not carry drawing tolerance semantics.",
+            )
 
-        return CrossValidationReport(checks=checks, summary=summary)
-
-    # --------------------------------------------------------------------- #
-    # Helper Methods
-    # --------------------------------------------------------------------- #
-
-    def _get_all_dimensions(self, annotations: DrawingAnnotations) -> list[Any]:
-        """Get all dimensions from all pages."""
-        dims = []
-        for page in annotations.pages:
-            dims.extend(page.dimensions)
-        return dims
-
-    def _count_drawing_holes(self, dimensions: list[Any]) -> int:
-        """Count hole-related dimensions on drawing."""
-        count = 0
-        for d in dimensions:
-            if d.type in ("diameter", "thread"):
-                count += 1
-        return count
-
-    def _count_model_holes(self, model_features: list[Any]) -> int:
-        """Count hole features in model."""
-        hole_types = {
-            "through_hole", "blind_hole", "counterbore",
-            "countersink", "cylindrical_bore", "tapped_hole_candidate",
-            "reamed_hole_candidate",
+        return {
+            "checks": checks,
+            "summary": summary,
+            "tolerances": self.tolerances,
+            "status": "needs_review"
+            if any(c["status"] in {"mismatch", "drawing_only", "model_only"} for c in checks)
+            else "match",
         }
-        count = 0
-        for f in model_features:
-            if f.type in hole_types:
-                count += 1
-        return count
-
-    def _find_drawing_dimension(
-        self,
-        dimensions: list[Any],
-        dim_name: str,
-    ) -> float | None:
-        """Find a drawing dimension matching the given overall dimension name."""
-        # Map dimension names to keywords
-        keywords = {
-            "length": ["length", "overall length", "o/all length"],
-            "width": ["width", "overall width", "o/all width"],
-            "height": ["height", "overall height", "o/all height", "thickness"],
-            "volume": [],  # Volume not typically dimensioned on drawings
-        }
-
-        kw_list = keywords.get(dim_name, [])
-        for d in dimensions:
-            if d.type != "linear":
-                continue
-            text_lower = d.text.lower()
-            if any(kw in text_lower for kw in kw_list):
-                return d.value
-
-        # Fallback: return first linear dimension that's reasonably large
-        if dim_name in ("length", "width", "height"):
-            candidates = [
-                d for d in dimensions
-                if d.type == "linear" and d.value and d.value > 10
-            ]
-            if candidates:
-                # Return the largest matching dimension as overall
-                return max(c.value for c in candidates if c.value)
-
-        return None
-
-    def _extract_model_dimensions(
-        self,
-        geometry_summary: GeometrySummary,
-    ) -> dict[str, float]:
-        """Extract comparable dimensions from model geometry summary."""
-        dims = {}
-        if geometry_summary and geometry_summary.bbox:
-            bbox = geometry_summary.bbox
-            dims["length"] = bbox.max.x - bbox.min.x
-            dims["width"] = bbox.max.y - bbox.min.y
-            dims["height"] = bbox.max.z - bbox.min.z
-            dims["volume"] = geometry_summary.volume
-        return dims
-
-    def _extract_drawing_material(
-        self,
-        annotations: DrawingAnnotations,
-    ) -> str | None:
-        """Extract material from drawing title block or notes."""
-        for page in annotations.pages:
-            if page.title_block and page.title_block.material:
-                return page.title_block.material
-            for note in page.notes:
-                if note.category == "material":
-                    return note.text
-        return None
-
-    def _extract_drawing_tolerances(
-        self,
-        annotations: DrawingAnnotations,
-    ) -> list[Any]:
-        """Extract all tolerance information from drawing."""
-        tolerances = []
-        for page in annotations.pages:
-            for d in page.dimensions:
-                if d.tolerance:
-                    tolerances.append(d)
-            for gt in page.gd_t:
-                if gt.value is not None:
-                    tolerances.append(gt)
-        return tolerances

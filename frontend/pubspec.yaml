@@ -10,12 +10,9 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_web_plugins:
-    sdk: flutter
 
   # State Management
   flutter_riverpod: ^2.5.1
-  riverpod_annotation: ^2.3.5
 
   # Navigation
   go_router: ^14.0.0
@@ -23,32 +20,16 @@ dependencies:
   # Networking
   dio: ^5.4.0
 
-  # Serialization
-  json_annotation: ^4.9.0
-
-  # UI Components
-  material_symbols_icons: ^4.2670.0
-
   # File Handling
   file_picker: ^8.0.0
-  path_provider: ^2.1.2
 
   # Utilities
   intl: ^0.19.0
   url_launcher: ^6.2.5
-  share_plus: ^9.0.0
-  package_info_plus: ^8.0.0
-  device_info_plus: ^10.1.0
-  connectivity_plus: ^5.0.2
+  cupertino_icons: ^1.0.8
 
-  # Logging
-  logger: ^2.2.0
-
-  # Charts/Visualization
-  fl_chart: ^0.68.0
-
-  # Local Storage
-  shared_preferences: ^2.2.2
+  # OCR (ML Kit - mobile only, web falls back to backend OCR)
+  google_ml_kit: ^0.13.0
 
 dev_dependencies:
   flutter_test:
@@ -57,17 +38,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  assets:
-    - assets/images/
-    - assets/icons/
-    - assets/fonts/
-  fonts:
-    - family: Inter
-      fonts:
-        - asset: assets/fonts/Inter-Regular.ttf
-        - asset: assets/fonts/Inter-Medium.ttf
-          weight: 500
-        - asset: assets/fonts/Inter-SemiBold.ttf
-          weight: 600
-        - asset: assets/fonts/Inter-Bold.ttf
-          weight: 700

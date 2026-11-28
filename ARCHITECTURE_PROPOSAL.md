@@ -1,8 +1,16 @@
-# JobEval — Architecture & Implementation Status
+# JobEval — Historical Architecture Proposal
+
+> **Status correction (2026-11-22):** This file is the original proposal and its
+> earlier "all phases complete" claim was not supported by runnable code or tests.
+> Treat the sections below as historical design notes. The implemented system,
+> compatibility decisions, current limitations, and verified milestone status are
+> maintained in [`docs/architecture/system-design.md`](docs/architecture/system-design.md),
+> [`docs/known-limitations.md`](docs/known-limitations.md), and
+> [`docs/progress/`](docs/progress/).
 
 **JobEval** — Intelligent CAD Analysis & CNC Cost Estimation
 
-## ✅ Implementation Status — ALL PHASES COMPLETE
+## Original proposal status (superseded)
 
 | Phase | Status | Details |
 |-------|--------|---------|

@@ -1,31 +1,29 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:jobeval/app/router.dart';
 import 'package:jobeval/app/theme.dart';
-import 'package:jobeval/core/providers.dart';
 
-class JobEvalApp extends ConsumerWidget {
+class JobEvalApp extends StatelessWidget {
   const JobEvalApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final themeMode = ref.watch(themeModeProvider);
-
+  Widget build(BuildContext context) {
     return MaterialApp.router(
       title: 'JobEval',
       debugShowCheckedModeBanner: false,
-      theme: JobEvalTheme.lightTheme,
-      darkTheme: JobEvalTheme.darkTheme,
-      themeMode: themeMode,
+      theme: JobEvalTheme.light,
+      darkTheme: JobEvalTheme.dark,
+      themeMode: ThemeMode.system,
       routerConfig: appRouter,
       builder: (context, child) {
+        final media = MediaQuery.of(context);
         return MediaQuery(
-          data: MediaQuery.of(context).copyWith(
-            textScaler: TextScaler.linear(
-              MediaQuery.of(context).textScaler.scale(1.0).clamp(0.8, 1.3),
+          data: media.copyWith(
+            textScaler: media.textScaler.clamp(
+              minScaleFactor: 0.85,
+              maxScaleFactor: 1.35,
             ),
           ),
-          child: child!,
+          child: child ?? const SizedBox.shrink(),
         );
       },
     );

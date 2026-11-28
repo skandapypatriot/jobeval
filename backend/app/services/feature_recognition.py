@@ -1,673 +1,817 @@
-"""Feature Recognition Engine - Geometry-based manufacturing feature detection.
+"""Topology- and analytic-surface based feature recognition.
 
-Detects: holes, counterbores, countersinks, slots, pockets, steps, shoulders,
-bosses, fillets, chamfers, grooves, ribs, thin walls, tapered surfaces.
+The recognizer intentionally does not infer a hole merely because a cylindrical
+face exists.  It combines the analytic surface, the face's neighbours, the
+axis span, and the material side of the face.  Every result carries evidence
+and a stable ID so a human review can be persisted without changing the raw
+ detection.
 """
 
-import logging
+from __future__ import annotations
+
+import hashlib
 import math
-from typing import Any, Optional
-from uuid import uuid4
+from collections import defaultdict
+from typing import Any
 
-from OCP.BRepAdaptor import BRepAdaptor_Surface
-from OCP.BRepClass3d import BRepClass3d_SolidClassifier
-from OCP.BRepExtrema import BRepExtrema_DistShapeShape
-from OCP.BRepGProp import BRepGProp
-from OCP.GeomAbs import (
-    GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone, GeomAbs_Torus, GeomAbs_Sphere,
-)
-from OCP.GProp import GProp_GProps
-from OCP.TopAbs import (
-    TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX, TopAbs_WIRE, TopAbs_SOLID,
-    TopAbs_IN, TopAbs_ON,
-)
-from OCP.TopExp import TopExp_Explorer
-from OCP.TopoDS import TopoDS, TopoDS_Shape, TopoDS_Face, TopoDS_Edge, TopoDS_Wire
-from OCP.gp import gp_Pnt, gp_Vec, gp_Ax1
-
-from app.core.config import get_settings
-from app.schemas.cad_specs import (
-    BoundingBox3D, CADSpecs, Feature, FeatureAccessibility, FeatureDimensions,
-    FeatureRelationship, FeatureType, GeometrySummary, Plane3D, UnitsInfo,
-    Vector3D, WarningItem, DepthType, DetectionMethod,
-)
-from app.services.geometry_utils import (
-    classify_face, get_face_surface_type, get_shape_bounding_box,
-    get_shape_volume_properties, identify_units,
-    is_cylindrical_face, is_conical_face, is_planar_face, is_toroidal_face,
-    _to_face, _to_edge,
-)
-
-settings = get_settings()
-logger = logging.getLogger(__name__)
+try:  # OCP is the supported OCCT Python binding for build123d 0.13.
+    from OCP.Bnd import Bnd_Box
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.BRepBndLib import BRepBndLib
+    from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+    from OCP.BRepGProp import BRepGProp
+    from OCP.GeomAbs import GeomAbs_SurfaceType
+    from OCP.gp import gp_Pnt
+    from OCP.GProp import GProp_GProps
+    from OCP.TopAbs import (
+        TopAbs_EDGE,
+        TopAbs_FACE,
+        TopAbs_IN,
+        TopAbs_ON,
+        TopAbs_OUT,
+        TopAbs_SHELL,
+        TopAbs_SOLID,
+        TopAbs_VERTEX,
+    )
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+except Exception:  # pragma: no cover - exercised only on unsupported installs
+    BRep_Tool = BRepAdaptor_Surface = BRepBndLib = BRepClass3d_SolidClassifier = None
+    BRepGProp = Bnd_Box = GeomAbs_SurfaceType = GProp_GProps = None
+    TopExp_Explorer = TopoDS = None
 
 
-# =============================================================================
-# Helper Functions
-# =============================================================================
+_GEOM_AVAILABLE = BRepAdaptor_Surface is not None
 
-def _face_center(face: TopoDS_Face) -> Vector3D:
-    """Get centroid of a face."""
+
+def _round(value: float, digits: int = 3) -> float:
+    return round(float(value), digits)
+
+
+def _vec(x: float, y: float, z: float) -> dict[str, float]:
+    return {"x": _round(x), "y": _round(y), "z": _round(z)}
+
+
+def _bbox(shape: Any) -> tuple[dict[str, float], dict[str, float]]:
+    if not _GEOM_AVAILABLE:
+        return (_vec(0, 0, 0), _vec(0, 0, 0))
+    box = Bnd_Box()
+    BRepBndLib.Add_s(shape, box)
+    low = box.CornerMin()
+    high = box.CornerMax()
+    return _vec(low.X(), low.Y(), low.Z()), _vec(high.X(), high.Y(), high.Z())
+
+
+def _face_bbox(face: Any) -> tuple[dict[str, float], dict[str, float]]:
+    return _bbox(face)
+
+
+def _area(face: Any) -> float:
     props = GProp_GProps()
     BRepGProp.SurfaceProperties_s(face, props)
-    c = props.CentreOfMass()
-    return Vector3D(x=c.X(), y=c.Y(), z=c.Z())
+    return float(props.Mass())
 
 
-def _face_area(face: TopoDS_Face) -> float:
-    """Calculate face area."""
+def _centroid(face: Any) -> tuple[float, float, float]:
     props = GProp_GProps()
     BRepGProp.SurfaceProperties_s(face, props)
-    return props.Mass()
+    point = props.CentreOfMass()
+    return point.X(), point.Y(), point.Z()
 
 
-def _face_normal_at_center(face: TopoDS_Face) -> Vector3D:
-    """Get surface normal at face center."""
-    surface = BRepAdaptor_Surface(face)
-    try:
-        from OCP.BRepTools import breptools_UVBounds
-        u_min, u_max, v_min, v_max = breptools_UVBounds(face)
-    except Exception:
-        u_min, u_max, v_min, v_max = 0.0, 1.0, 0.0, 1.0
-    u_mid = (u_min + u_max) / 2
-    v_mid = (v_min + v_max) / 2
-    pnt = gp_Pnt()
-    normal = gp_Vec()
-    surface.D1(u_mid, v_mid, pnt, normal)
-    return Vector3D(x=normal.X(), y=normal.Y(), z=normal.Z())
+def _normalise_axis(direction: tuple[float, float, float]) -> tuple[float, float, float]:
+    x, y, z = direction
+    length = math.sqrt(x * x + y * y + z * z) or 1.0
+    x, y, z = x / length, y / length, z / length
+    # Canonical sign makes opposite orientations part of the same axis group.
+    for component in (x, y, z):
+        if abs(component) > 1e-8:
+            if component < 0:
+                x, y, z = -x, -y, -z
+            break
+    return x, y, z
 
 
-def _cylinder_axis_radius(face: TopoDS_Face) -> tuple[Vector3D, Vector3D, float]:
-    """Extract cylinder axis location, direction, and radius."""
-    surface = BRepAdaptor_Surface(face)
-    cyl = surface.Cylinder()
-    axis = cyl.Axis()
-    loc = axis.Location()
-    direction = axis.Direction()
-    return (
-        Vector3D(x=loc.X(), y=loc.Y(), z=loc.Z()),
-        Vector3D(x=direction.X(), y=direction.Y(), z=direction.Z()),
-        cyl.Radius(),
-    )
+def _axis_key(direction: tuple[float, float, float], location: tuple[float, float, float]) -> str:
+    dx, dy, dz = _normalise_axis(direction)
+    dot = dx * location[0] + dy * location[1] + dz * location[2]
+    px = location[0] - dx * dot
+    py = location[1] - dy * dot
+    pz = location[2] - dz * dot
+    return f"{dx:.4f},{dy:.4f},{dz:.4f}|{px:.3f},{py:.3f},{pz:.3f}"
 
 
-def _cone_axis_angle(face: TopoDS_Face) -> tuple[Vector3D, Vector3D, float]:
-    """Extract cone axis location, direction, and semi-angle in degrees."""
-    surface = BRepAdaptor_Surface(face)
-    cone = surface.Cone()
-    axis = cone.Axis()
-    loc = axis.Location()
-    direction = axis.Direction()
-    return (
-        Vector3D(x=loc.X(), y=loc.Y(), z=loc.Z()),
-        Vector3D(x=direction.X(), y=direction.Y(), z=direction.Z()),
-        math.degrees(cone.SemiAngle()),
-    )
+def _projection(value: tuple[float, float, float], axis: tuple[float, float, float]) -> float:
+    return value[0] * axis[0] + value[1] * axis[1] + value[2] * axis[2]
 
 
-def _torus_axis_radii(face: TopoDS_Face) -> tuple[Vector3D, Vector3D, float, float]:
-    """Extract torus axis location, direction, major radius, minor radius."""
-    surface = BRepAdaptor_Surface(face)
-    torus = surface.Torus()
-    axis = torus.Axis()
-    loc = axis.Location()
-    direction = axis.Direction()
-    return (
-        Vector3D(x=loc.X(), y=loc.Y(), z=loc.Z()),
-        Vector3D(x=direction.X(), y=direction.Y(), z=direction.Z()),
-        torus.MajorRadius(),
-        torus.MinorRadius(),
-    )
+def _bbox_corners(
+    low: dict[str, float], high: dict[str, float]
+) -> list[tuple[float, float, float]]:
+    return [
+        (low["x"], low["y"], low["z"]),
+        (high["x"], low["y"], low["z"]),
+        (low["x"], high["y"], low["z"]),
+        (high["x"], high["y"], low["z"]),
+        (low["x"], low["y"], high["z"]),
+        (high["x"], low["y"], high["z"]),
+        (low["x"], high["y"], high["z"]),
+        (high["x"], high["y"], high["z"]),
+    ]
 
 
-def _plane_origin_normal(face: TopoDS_Face) -> tuple[Vector3D, Vector3D]:
-    """Extract plane origin and normal."""
-    surface = BRepAdaptor_Surface(face)
-    plane = surface.Plane()
-    axis = plane.Axis()
-    loc = axis.Location()
-    direction = axis.Direction()
-    return (
-        Vector3D(x=loc.X(), y=loc.Y(), z=loc.Z()),
-        Vector3D(x=direction.X(), y=direction.Y(), z=direction.Z()),
-    )
+def _face_surface(face: Any) -> dict[str, Any]:
+    adaptor = BRepAdaptor_Surface(face)
+    surface_type = adaptor.GetType()
+    result: dict[str, Any] = {"type": "other", "surface_type": str(surface_type)}
+    if surface_type == GeomAbs_SurfaceType.GeomAbs_Plane:
+        plane = adaptor.Plane()
+        axis = plane.Axis()
+        location = axis.Location()
+        direction = axis.Direction()
+        result.update(
+            type="planar",
+            origin=_vec(location.X(), location.Y(), location.Z()),
+            normal=_vec(direction.X(), direction.Y(), direction.Z()),
+        )
+    elif surface_type == GeomAbs_SurfaceType.GeomAbs_Cylinder:
+        cylinder = adaptor.Cylinder()
+        axis = cylinder.Axis()
+        location = axis.Location()
+        direction = axis.Direction()
+        result.update(
+            type="cylindrical",
+            axis=_vec(direction.X(), direction.Y(), direction.Z()),
+            axis_location=_vec(location.X(), location.Y(), location.Z()),
+            radius=float(cylinder.Radius()),
+        )
+    elif surface_type == GeomAbs_SurfaceType.GeomAbs_Cone:
+        cone = adaptor.Cone()
+        axis = cone.Axis()
+        location = axis.Location()
+        direction = axis.Direction()
+        result.update(
+            type="conical",
+            axis=_vec(direction.X(), direction.Y(), direction.Z()),
+            axis_location=_vec(location.X(), location.Y(), location.Z()),
+            semi_angle_deg=math.degrees(float(cone.SemiAngle())),
+            reference_radius=float(cone.RefRadius()),
+        )
+    elif surface_type == GeomAbs_SurfaceType.GeomAbs_Torus:
+        torus = adaptor.Torus()
+        axis = torus.Axis()
+        location = axis.Location()
+        direction = axis.Direction()
+        result.update(
+            type="toroidal",
+            axis=_vec(direction.X(), direction.Y(), direction.Z()),
+            axis_location=_vec(location.X(), location.Y(), location.Z()),
+            major_radius=float(torus.MajorRadius()),
+            minor_radius=float(torus.MinorRadius()),
+        )
+    elif surface_type == GeomAbs_SurfaceType.GeomAbs_Sphere:
+        sphere = adaptor.Sphere()
+        result.update(type="spherical", radius=float(sphere.Radius()))
+    return result
 
 
-def _get_face_wires(face: TopoDS_Face) -> list[TopoDS_Wire]:
-    """Get all wire loops from a face."""
-    wires = []
-    exp = TopExp_Explorer(face, TopAbs_WIRE)
-    while exp.More():
-        wires.append(TopoDS.Wire(exp.Current()))
-        exp.Next()
-    return wires
+def _face_edges(face: Any) -> list[Any]:
+    edges: list[Any] = []
+    if not _GEOM_AVAILABLE:
+        return edges
+    from OCP.TopAbs import TopAbs_EDGE, TopAbs_WIRE
 
-
-def _get_wire_edges(wire: TopoDS_Wire) -> list[TopoDS_Edge]:
-    """Get all edges from a wire."""
-    edges = []
-    exp = TopExp_Explorer(wire, TopAbs_EDGE)
-    while exp.More():
-        edges.append(_to_edge(exp.Current()))
-        exp.Next()
+    explorer = TopExp_Explorer(face, TopAbs_WIRE)
+    while explorer.More():
+        wire = TopoDS.Wire(explorer.Current())
+        edge_explorer = TopExp_Explorer(wire, TopAbs_EDGE)
+        while edge_explorer.More():
+            edges.append(TopoDS.Edge(edge_explorer.Current()))
+            edge_explorer.Next()
+        explorer.Next()
     return edges
 
 
-def _get_face_edges(face: TopoDS_Face) -> list[TopoDS_Edge]:
-    """Get all edges from a face."""
-    return _get_wire_edges(_get_face_wires(face)[0]) if _get_face_wires(face) else []
+def _shares_edge(left: list[Any], right: list[Any]) -> bool:
+    return any(a.IsSame(b) for a in left for b in right)
 
 
-def _faces_share_edge(face1: TopoDS_Face, face2: TopoDS_Face) -> bool:
-    """Check if two faces share at least one edge."""
-    edges1 = {id(e) for e in _get_face_edges(face1)}
-    return any(id(e) in edges1 for e in _get_face_edges(face2))
+def _solid_side(shape: Any, point: tuple[float, float, float]) -> str:
+    """Classify a point as in/out/on the material, when OCCT can do so."""
 
-
-def _is_point_inside_solid(shape: TopoDS_Shape, point: Vector3D, tolerance: float = 1e-6) -> bool:
-    """Check if a point is inside a solid."""
-    classifier = BRepClass3d_SolidClassifier(shape, gp_Pnt(point.x, point.y, point.z), tolerance)
-    return classifier.State() in (TopAbs_IN, TopAbs_ON)
-
-
-def _are_axes_parallel(a1: Vector3D, a2: Vector3D, tolerance: float = 0.01) -> bool:
-    """Check if two vectors are parallel (or anti-parallel)."""
-    dot = abs(a1.x * a2.x + a1.y * a2.y + a1.z * a2.z)
-    mag1 = math.sqrt(a1.x**2 + a1.y**2 + a1.z**2)
-    mag2 = math.sqrt(a2.x**2 + a2.y**2 + a2.z**2)
-    if mag1 == 0 or mag2 == 0:
-        return False
-    return abs(dot / (mag1 * mag2) - 1.0) < tolerance
-
-
-def _estimate_hole_depth(shape: TopoDS_Shape, axis: Vector3D, location: Vector3D, conversion: float) -> Optional[float]:
-    """Estimate hole depth by projecting along axis until exiting solid."""
+    if not _GEOM_AVAILABLE or BRepClass3d_SolidClassifier is None:
+        return "unknown"
     try:
-        max_dist = 1000.0 * conversion
-        step = 0.25 * conversion
-        dist = 0.0
-        inside = False
-        while dist < max_dist:
-            p = gp_Pnt(location.x + axis.x * dist, location.y + axis.y * dist, location.z + axis.z * dist)
-            state = BRepClass3d_SolidClassifier(shape, p, 1e-6).State()
-            if state in (TopAbs_IN, TopAbs_ON):
-                inside = True
-                dist += step
-            else:
-                if inside:
-                    return round(dist * conversion, 3)
-                break
-        return None
+        classifier = BRepClass3d_SolidClassifier(shape, gp_Pnt(*point), 1e-6)
+        state = classifier.State()
+        if state == TopAbs_IN:
+            return "in"
+        if state == TopAbs_OUT:
+            return "out"
+        if state == TopAbs_ON:
+            return "on"
     except Exception:
-        return None
+        pass
+    return "unknown"
 
 
-# =============================================================================
-# Main Feature Recognition
-# =============================================================================
+def _stable_id(feature_type: str, key: str) -> str:
+    digest = hashlib.sha1(f"{feature_type}|{key}".encode()).hexdigest()[:10].upper()
+    return f"F-{feature_type.upper().replace('_', '-')}-{digest}"
 
-def recognize_features(shape: TopoDS_Shape, units_info: UnitsInfo) -> tuple[list[Feature], list[FeatureRelationship], list[WarningItem]]:
+
+def _base_feature(
+    feature_type: str,
+    key: str,
+    position: tuple[float, float, float],
+    confidence: float,
+    method: str,
+    evidence: dict[str, Any],
+    *,
+    axis: tuple[float, float, float] | None = None,
+    faces: list[str] | None = None,
+    dimensions: dict[str, Any] | None = None,
+    accessibility: str = "good",
+    subtype: str | None = None,
+    depth_type: str | None = None,
+    through: bool = False,
+) -> dict[str, Any]:
+    feature: dict[str, Any] = {
+        "feature_id": _stable_id(feature_type, key),
+        "type": feature_type,
+        "subtype": subtype,
+        "position": _vec(*position),
+        "axis": _vec(*axis) if axis else None,
+        "dimensions": dimensions or {},
+        "depth_type": depth_type,
+        "through": through,
+        "open": feature_type in {"through_hole", "blind_hole", "counterbore", "countersink"},
+        "faces": faces or [],
+        "edges": [],
+        "confidence": max(0.0, min(1.0, confidence)),
+        "detection_method": method,
+        "evidence": evidence,
+        "accessibility": {"collision_risk": accessibility, "notes": []},
+        "review_state": "raw",
+        "reviewed": False,
+        "warnings": [],
+        "source": "geometry",
+    }
+    return feature
+
+
+def recognize_features(
+    shape: Any, units_info: Any = "mm", conversion_factor: float | None = None
+) -> dict[str, Any]:
+    """Recognize supported manufacturing features from a STEP shape.
+
+    Returns a real analysis payload with ``geometry_summary``, ``bodies``,
+    ``faces``, ``raw_features``, ``units`` and ``warnings``.  ``units_info``
+    may be the legacy object exposing ``conversion_factor``, a unit string, or
+    a units dict (as produced by :func:`cad_service.detect_source_units`).
+    Coordinates returned by OCCT are normalized to millimetres; the factor is
+    accepted for API compatibility and recorded in evidence.
     """
-    Main feature recognition entry point.
-    Detects holes, counterbores, countersinks, slots, pockets, steps, shoulders,
-    bosses, fillets, chamfers, grooves, ribs, thin walls, tapered surfaces.
-    """
-    features: list[Feature] = []
-    relationships: list[FeatureRelationship] = []
-    warnings: list[WarningItem] = []
 
-    conversion = units_info.conversion_factor
-
-    # Collect all faces
-    face_map: dict[str, TopoDS_Face] = {}
-    face_id_counter = 0
-    exp = TopExp_Explorer(shape, TopAbs_FACE)
-    while exp.More():
-        face = TopoDS.Face(exp.Current())
-        face_id = f"face_{face_id_counter}"
-        face_map[face_id] = face
-        face_id_counter += 1
-        exp.Next()
-
-    # Classify faces
-    face_classifications: dict[str, dict] = {}
-    for fid, face in face_map.items():
-        face_classifications[fid] = classify_face(face)
-
-    # =========================================================================
-    # 1. Cylindrical Faces -> Holes, Counterbores, Threads
-    # =========================================================================
-    cylindrical_faces = [
-        fid for fid, cls in face_classifications.items()
-        if cls.get("type") == "cylindrical"
-    ]
-
-    # Group cylindrical faces by axis (same hole may have multiple cylindrical faces
-    # for counterbore: large diameter + small diameter)
-    axis_groups: dict[str, list[dict]] = {}
-    for fid in cylindrical_faces:
-        face = face_map[fid]
-        try:
-            loc, axis, radius = _cylinder_axis_radius(face)
-            key = f"{round(axis.x, 3)}_{round(axis.y, 3)}_{round(axis.z, 3)}_{round(loc.x, 3)}_{round(loc.y, 3)}_{round(loc.z, 3)}"
-            if key not in axis_groups:
-                axis_groups[key] = {"axis": axis, "location": loc, "faces": []}
-            axis_groups[key]["faces"].append({
-                "fid": fid,
-                "face": face,
-                "radius": radius,
-            })
-        except Exception as e:
-            logger.warning(f"Could not extract cylinder from face {fid}: {e}")
-            continue
-
-    for group_key, group in axis_groups.items():
-        faces_info = group["faces"]
-        axis = group["axis"]
-        loc = group["location"]
-
-        # Sort by radius descending (largest first = counterbore top)
-        faces_info.sort(key=lambda f: f["radius"], reverse=True)
-        primary = faces_info[0]
-        diameter_mm = round(2 * primary["radius"] * conversion, 3)
-
-        # Check for counterbore: multiple cylindrical faces on same axis
-        is_counterbore = len(faces_info) > 1
-        secondary_diameter = None
-        if is_counterbore:
-            secondary_diameter = round(2 * faces_info[-1]["radius"] * conversion, 3)
-
-        # Determine if through or blind
-        # Count adjacent planar faces (caps)
-        planar_neighbors = 0
-        for other_fid, other_face in face_map.items():
-            if other_fid in [f["fid"] for f in faces_info]:
-                continue
-            if face_classifications[other_fid].get("type") == "planar":
-                if _faces_share_edge(primary["face"], other_face):
-                    planar_neighbors += 1
-
-        depth_type = DepthType.THROUGH if planar_neighbors >= 2 else DepthType.BLIND
-        depth_mm = None
-        if depth_type == DepthType.THROUGH:
-            depth_mm = _estimate_hole_depth(shape, axis, loc, conversion)
-
-        confidence = 0.9 if planar_neighbors >= 1 else 0.6
-        if is_counterbore:
-            confidence = 0.85
-            feature_type = FeatureType.COUNTERBORE
-            subtype = f"counterbore_Ø{diameter_mm}_x_Ø{secondary_diameter}"
+    if not _GEOM_AVAILABLE:
+        raise RuntimeError("OCP is required for STEP feature recognition")
+    warnings: list[dict[str, Any]] = []
+    if conversion_factor is None:
+        if isinstance(units_info, dict):
+            conversion_factor = float(units_info.get("conversion_factor", 1.0) or 1.0)
         else:
-            feature_type = FeatureType.THROUGH_HOLE if depth_type == DepthType.THROUGH else FeatureType.BLIND_HOLE
-            subtype = None
+            conversion_factor = float(getattr(units_info, "conversion_factor", 1.0) or 1.0)
+    units = (
+        units_info
+        if isinstance(units_info, dict)
+        else {"source": str(units_info), "normalized": "mm", "conversion_factor": conversion_factor}
+    )
 
-        # Check for thread candidates (small holes, typically M3-M12)
-        is_tapped_candidate = (
-            not is_counterbore and
-            3.0 <= diameter_mm <= 12.0 and
-            depth_type == DepthType.BLIND
+    faces: list[dict[str, Any]] = []
+    face_objects: list[Any] = []
+    explorer = TopExp_Explorer(shape, TopAbs_FACE)
+    while explorer.More():
+        face = TopoDS.Face(explorer.Current())
+        low, high = _face_bbox(face)
+        info = _face_surface(face)
+        info.update(
+            face_id=f"face_{len(faces):04d}",
+            area=_round(_area(face), 5),
+            bbox={"min": low, "max": high},
+            centroid=list(_centroid(face)),
         )
+        faces.append(info)
+        face_objects.append(face)
+        explorer.Next()
 
-        final_type = FeatureType.TAPPED_HOLE_CANDIDATE if is_tapped_candidate else feature_type
+    edge_lists = [_face_edges(face) for face in face_objects]
+    adjacency: list[list[int]] = [[] for _ in faces]
+    for i in range(len(faces)):
+        for j in range(i + 1, len(faces)):
+            if _shares_edge(edge_lists[i], edge_lists[j]):
+                adjacency[i].append(j)
+                adjacency[j].append(i)
 
-        feature = Feature(
-            feature_id=f"F-{uuid4().hex[:6].upper()}",
-            type=final_type,
+    shape_low, shape_high = _bbox(shape)
+    shape_size = {
+        "x": shape_high["x"] - shape_low["x"],
+        "y": shape_high["y"] - shape_low["y"],
+        "z": shape_high["z"] - shape_low["z"],
+    }
+    features: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+
+    # Cylindrical surfaces are grouped by their *axis line*, not by radius or
+    # face count.  This identifies coaxial counterbores and stepped bores.
+    cylinder_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for index, info in enumerate(faces):
+        if info["type"] != "cylindrical":
+            continue
+        axis = tuple(info["axis"].values())
+        location = tuple(info["axis_location"].values())
+        key = _axis_key(axis, location)
+        info = dict(info)
+        info["index"] = index
+        info["group_key"] = key
+        info["axis_tuple"] = axis
+        info["location_tuple"] = location
+        cylinder_groups[key].append(info)
+
+    for group_key, group in cylinder_groups.items():
+        group.sort(key=lambda item: item["radius"], reverse=True)
+        primary = group[0]
+        axis = primary["axis_tuple"]
+        location = primary["location_tuple"]
+        radius = primary["radius"]
+        # Face centre and radial direction are used to distinguish a void from
+        # a boss by checking which side contains material.
+        centre = tuple(primary["centroid"])
+        radial = (centre[0] - location[0], centre[1] - location[1], centre[2] - location[2])
+        radial_length = math.sqrt(sum(v * v for v in radial))
+        if radial_length > 1e-8:
+            radial = tuple(v / radial_length for v in radial)
+            probe = (
+                centre[0] - radial[0] * min(radius * 0.25, 0.25),
+                centre[1] - radial[1] * min(radius * 0.25, 0.25),
+                centre[2] - radial[2] * min(radius * 0.25, 0.25),
+            )
+        else:
+            probe = centre
+        side = _solid_side(shape, probe)
+        # A cylinder whose inward side is outside the material is a hole.  A
+        # boss has material on its inward side.  Fall back to adjacency when
+        # the classifier cannot handle a compound shape.
+        planar_neighbours = [j for j in adjacency[primary["index"]] if faces[j]["type"] == "planar"]
+        is_hole = side == "out" or (side == "unknown" and bool(planar_neighbours))
+        if not is_hole:
+            continue
+
+        projections: list[float] = []
+        for item in group:
+            low, high = item["bbox"]["min"], item["bbox"]["max"]
+            projections.extend(_projection(corner, axis) for corner in _bbox_corners(low, high))
+        span = max(projections) - min(projections)
+        axis_extent = max(
+            abs(shape_size["x"] * axis[0]),
+            abs(shape_size["y"] * axis[1]),
+            abs(shape_size["z"] * axis[2]),
+        )
+        through = bool(axis_extent and span >= axis_extent * 0.88)
+
+        # Multiple coaxial cylinders are a counterbore candidate when the
+        # larger radius is the outer portion and the smaller radius continues
+        # below it.  A single cylinder is an ordinary hole.
+        counterbore = False
+        secondary_radius = None
+        if len(group) > 1:
+            secondary_radius = group[-1]["radius"]
+            # Require a distinct radius and a radial step (not two duplicate
+            # faces from a split seam).
+            counterbore = abs(radius - secondary_radius) > max(1e-4, radius * 0.02)
+        feature_type = (
+            "counterbore" if counterbore else ("through_hole" if through else "blind_hole")
+        )
+        subtype = None
+        dimensions: dict[str, Any] = {
+            "diameter": _round(2.0 * radius * conversion_factor, 4),
+            "depth": _round(span * conversion_factor, 4),
+        }
+        if counterbore and secondary_radius is not None:
+            dimensions["major_diameter"] = _round(2.0 * radius * conversion_factor, 4)
+            dimensions["secondary_diameter"] = _round(2.0 * secondary_radius * conversion_factor, 4)
+            subtype = "coaxial_stepped_bore"
+        position = tuple(primary["centroid"])
+        evidence = {
+            "surface": "cylinder",
+            "axis_line": group_key,
+            "radius_mm": _round(radius * conversion_factor, 4),
+            "axial_span_mm": _round(span * conversion_factor, 4),
+            "material_side": side,
+            "adjacent_face_ids": [faces[j]["face_id"] for j in adjacency[primary["index"]]],
+            "planar_neighbour_count": len(planar_neighbours),
+            "analysis": "analytic cylinder plus material-side and adjacency checks",
+        }
+        feature = _base_feature(
+            feature_type,
+            group_key,
+            position,
+            0.92 if through else 0.82,
+            "analytic_cylinder_with_adjacency",
+            evidence,
+            axis=axis,
+            faces=[item["face_id"] for item in group],
+            dimensions=dimensions,
+            accessibility="good" if through else "limited",
             subtype=subtype,
-            position=Vector3D(
-                x=round(loc.x * conversion, 3),
-                y=round(loc.y * conversion, 3),
-                z=round(loc.z * conversion, 3),
-            ),
-            axis=Vector3D(x=round(axis.x, 3), y=round(axis.y, 3), z=round(axis.z, 3)),
-            dimensions=FeatureDimensions(
-                diameter=diameter_mm,
-                depth=depth_mm,
-                major_diameter=secondary_diameter if is_counterbore else None,
-            ),
-            depth_type=depth_type.value,
-            faces=[f["fid"] for f in faces_info],
-            edges=[],
-            open=True,
-            through=(depth_type == DepthType.THROUGH),
-            accessibility=FeatureAccessibility(
-                approach_vectors=[
-                    Vector3D(x=-axis.x, y=-axis.y, z=-axis.z),
-                    Vector3D(x=axis.x, y=axis.y, z=axis.z),
-                ],
-                collision_risk="good",
-            ),
-            confidence=confidence,
-            detection_method=DetectionMethod.CYLINDRICAL_FACE_PAIR,
-            warnings=[],
+            depth_type="through" if through else "blind",
+            through=through,
         )
-        features.append(feature)
-
-    # =========================================================================
-    # 2. Conical Faces -> Countersinks
-    # =========================================================================
-    conical_faces = [
-        fid for fid, cls in face_classifications.items()
-        if cls.get("type") == "conical"
-    ]
-
-    for fid in conical_faces:
-        face = face_map[fid]
-        try:
-            loc, axis, semi_angle_deg = _cone_axis_angle(face)
-            chamfer_angle_deg = round(90.0 - semi_angle_deg, 1)
-
-            # Check for adjacent cylindrical face (countersink vs standalone chamfer)
-            adjacent_cylindrical = []
-            for other_fid, other_face in face_map.items():
-                if other_fid == fid:
-                    continue
-                if face_classifications[other_fid].get("type") == "cylindrical":
-                    if _faces_share_edge(face, other_face):
-                        adjacent_cylindrical.append(other_fid)
-
-            feature_type = FeatureType.COUNTERSINK if adjacent_cylindrical else FeatureType.CHAMFER
-            confidence = 0.85 if adjacent_cylindrical else 0.75
-
-            feature = Feature(
-                feature_id=f"F-{uuid4().hex[:6].upper()}",
-                type=feature_type,
-                subtype="countersink" if adjacent_cylindrical else "standalone_chamfer",
-                position=Vector3D(
-                    x=round(loc.x * conversion, 3),
-                    y=round(loc.y * conversion, 3),
-                    z=round(loc.z * conversion, 3),
-                ),
-                axis=Vector3D(x=round(axis.x, 3), y=round(axis.y, 3), z=round(axis.z, 3)),
-                dimensions=FeatureDimensions(
-                    angle=chamfer_angle_deg,
-                    chamfer_distance=round(semi_angle_deg * conversion, 3),
-                ),
-                faces=[fid] + adjacent_cylindrical,
-                edges=[],
-                open=True,
-                through=False,
-                accessibility=FeatureAccessibility(
-                    approach_vectors=[Vector3D(x=axis.x, y=axis.y, z=axis.z)],
-                    collision_risk="good",
-                ),
-                confidence=confidence,
-                detection_method=DetectionMethod.CONICAL_FACE_BETWEEN_PLANES,
-                warnings=[],
-            )
+        if feature["feature_id"] not in used_ids:
+            used_ids.add(feature["feature_id"])
             features.append(feature)
-        except Exception as e:
-            logger.warning(f"Could not extract cone from face {fid}: {e}")
+
+    planar_indices_for_size = [i for i, item in enumerate(faces) if item["type"] == "planar"]
+    max_planar_area = max((faces[i]["area"] for i in planar_indices_for_size), default=0.0)
+
+    # Cylindrical faces that are not bores can be rounded corners/fillets.
+    # A fillet is evidenced by a cylindrical surface meeting at least two
+    # non-parallel planar faces; this is distinct from a cylinder-count-only
+    # hole heuristic.
+    hole_face_ids: set[str] = set()
+    for feature in features:
+        if feature.get("type") in {"through_hole", "blind_hole", "counterbore", "countersink"}:
+            hole_face_ids.update(feature.get("faces", []))
+    for index, info in enumerate(faces):
+        if info["type"] != "cylindrical" or info["face_id"] in hole_face_ids:
             continue
-
-    # =========================================================================
-    # 3. Toroidal Faces -> Fillets / Rounded Corners
-    # =========================================================================
-    toroidal_faces = [
-        fid for fid, cls in face_classifications.items()
-        if cls.get("type") == "toroidal"
-    ]
-
-    for fid in toroidal_faces:
-        face = face_map[fid]
-        try:
-            loc, axis, major_r, minor_r = _torus_axis_and_radii(face)
-            corner_radius_mm = round(minor_r * conversion, 3)
-
-            # Find adjacent planar faces
-            adjacent_planar = []
-            for other_fid, other_face in face_map.items():
-                if other_fid == fid:
-                    continue
-                if face_classifications[other_fid].get("type") == "planar":
-                    if _faces_share_edge(face, other_face):
-                        adjacent_planar.append(other_fid)
-
-            feature = Feature(
-                feature_id=f"F-{uuid4().hex[:6].upper()}",
-                type=FeatureType.FILLET,
-                subtype="internal" if len(adjacent_planar) >= 2 else "external",
-                position=Vector3D(
-                    x=round(loc.x * conversion, 3),
-                    y=round(loc.y * conversion, 3),
-                    z=round(loc.z * conversion, 3),
-                ),
-                axis=Vector3D(x=round(axis.x, 3), y=round(axis.y, 3), z=round(axis.z, 3)),
-                dimensions=FeatureDimensions(
-                    corner_radius=corner_radius_mm,
-                ),
-                faces=[fid] + adjacent_planar,
-                edges=[],
-                open=False,
-                through=False,
-                accessibility=FeatureAccessibility(
-                    approach_vectors=[Vector3D(x=axis.x, y=axis.y, z=axis.z)],
-                    collision_risk="good",
-                ),
-                confidence=0.85,
-                detection_method=DetectionMethod.TOROIDAL_FACE_BETWEEN_PLANES,
-                warnings=[],
-            )
+        planar_neighbours = [j for j in adjacency[index] if faces[j]["type"] == "planar"]
+        if len(planar_neighbours) < 2:
+            continue
+        normals = [tuple(faces[j]["normal"].values()) for j in planar_neighbours]
+        non_parallel = any(
+            abs(sum(a * b for a, b in zip(normals[0], other))) < 0.95 for other in normals[1:]
+        )
+        if not non_parallel:
+            continue
+        axis = tuple(info["axis"].values())
+        key = f"{info['face_id']}|{info['radius']:.4f}"
+        feature = _base_feature(
+            "fillet",
+            key,
+            tuple(info["centroid"]),
+            0.76,
+            "cylindrical_surface_between_nonparallel_planes",
+            {
+                "surface": "cylinder",
+                "radius_mm": _round(info["radius"] * conversion_factor, 4),
+                "adjacent_face_ids": [faces[j]["face_id"] for j in planar_neighbours],
+                "analysis": "rounded corner evidenced by cylindrical surface and planar adjacency",
+            },
+            axis=axis,
+            faces=[info["face_id"]] + [faces[j]["face_id"] for j in planar_neighbours],
+            dimensions={"corner_radius": _round(info["radius"] * conversion_factor, 4)},
+            accessibility="good",
+        )
+        if feature["feature_id"] not in used_ids:
+            used_ids.add(feature["feature_id"])
             features.append(feature)
-        except Exception as e:
-            logger.warning(f"Could not extract torus from face {fid}: {e}")
+
+    # Narrow planar faces between non-parallel planes are chamfer evidence.
+    # Large parallel faces are steps/shoulders and are handled separately.
+    for index, info in enumerate(faces):
+        if info["type"] != "planar":
             continue
-
-    # =========================================================================
-    # 4. Planar Faces -> Pockets, Steps, Shoulders, Bosses, Flat Faces
-    # =========================================================================
-    planar_faces = [
-        fid for fid, cls in face_classifications.items()
-        if cls.get("type") == "planar"
-    ]
-
-    # Group planar faces by normal direction
-    plane_groups: dict[str, list[str]] = {}
-    for fid in planar_faces:
-        face = face_map[fid]
-        try:
-            origin, normal = _plane_origin_normal(face)
-            key = f"{round(normal.x, 2)}_{round(normal.y, 2)}_{round(normal.z, 2)}"
-            if key not in plane_groups:
-                plane_groups[key] = []
-            plane_groups[key].append(fid)
-        except Exception:
+        if max_planar_area and info["area"] > max_planar_area * 0.25:
             continue
+        planar_neighbours = [j for j in adjacency[index] if faces[j]["type"] == "planar"]
+        normal = tuple(info["normal"].values())
+        # Axis-aligned narrow exterior walls are not chamfers.  A true
+        # chamfer has an oblique normal (or is an interior transition).
+        if max(abs(component) for component in normal) > 0.98:
+            # A purely axis-aligned narrow face is an internal wall or an
+            # exterior wall, not a chamfer transition.
+            continue
+        angled = [
+            j
+            for j in planar_neighbours
+            if abs(sum(a * b for a, b in zip(normal, tuple(faces[j]["normal"].values())))) < 0.95
+        ]
+        if len(angled) < 2:
+            continue
+        key = f"{info['face_id']}|chamfer"
+        feature = _base_feature(
+            "chamfer",
+            key,
+            tuple(info["centroid"]),
+            0.68,
+            "narrow_planar_face_between_angled_planes",
+            {
+                "surface": "plane",
+                "face_area_mm2": _round(info["area"] * conversion_factor * conversion_factor, 4),
+                "adjacent_face_ids": [faces[j]["face_id"] for j in angled],
+                "analysis": "narrow planar transition between non-parallel planes",
+            },
+            faces=[info["face_id"]] + [faces[j]["face_id"] for j in angled],
+            dimensions={"chamfer_distance": _round(math.sqrt(info["area"]) * conversion_factor, 4)},
+            accessibility="good",
+        )
+        if feature["feature_id"] not in used_ids:
+            used_ids.add(feature["feature_id"])
+            features.append(feature)
 
-    # For each plane group, analyze faces
-    for group_key, face_ids in plane_groups.items():
-        # Sort by area descending
-        face_areas = [(fid, _face_area(face_map[fid])) for fid in face_ids]
-        face_areas.sort(key=lambda x: x[1], reverse=True)
+    # Conical faces adjacent to a cylindrical bore are countersink candidates.
+    for index, info in enumerate(faces):
+        if info["type"] != "conical":
+            continue
+        adjacent_cylinders = [j for j in adjacency[index] if faces[j]["type"] == "cylindrical"]
+        adjacent_planes = [j for j in adjacency[index] if faces[j]["type"] == "planar"]
+        axis = tuple(info["axis"].values())
+        axis_location = tuple(info["axis_location"].values())
+        cone_axis_key = _axis_key(axis, axis_location)
+        coaxial_cylinders = [
+            item
+            for item in cylinder_groups.get(cone_axis_key, [])
+            if item["face_id"] != info["face_id"]
+        ]
+        key = f"{info['face_id']}|{info['reference_radius']:.4f}"
+        if adjacent_cylinders or coaxial_cylinders:
+            feature_type = "countersink"
+            confidence = 0.86 if adjacent_cylinders else 0.74
+            method = "conical_surface_coaxial_with_cylinder"
+        elif adjacent_planes:
+            feature_type = "chamfer"
+            confidence = 0.72
+            method = "conical_surface_adjacent_to_plane"
+        else:
+            feature_type = "chamfer"
+            confidence = 0.55
+            method = "standalone_conical_surface"
+        dimensions = {
+            "angle": _round(90.0 - info["semi_angle_deg"], 3),
+            "chamfer_distance": _round(info["reference_radius"] * conversion_factor, 4),
+        }
+        feature = _base_feature(
+            feature_type,
+            key,
+            tuple(info["centroid"]),
+            confidence,
+            method,
+            {
+                "surface": "cone",
+                "semi_angle_deg": _round(info["semi_angle_deg"], 4),
+                "adjacent_face_ids": [faces[j]["face_id"] for j in adjacency[index]],
+                "adjacent_cylinder_count": len(adjacent_cylinders),
+            },
+            axis=axis,
+            faces=[info["face_id"]]
+            + [faces[j]["face_id"] for j in adjacent_cylinders + adjacent_planes],
+            dimensions=dimensions,
+            accessibility="good",
+        )
+        if feature["feature_id"] not in used_ids:
+            used_ids.add(feature["feature_id"])
+            features.append(feature)
 
-        for fid, area in face_areas:
-            face = face_map[fid]
-            if area < 1.0 * conversion * conversion:  # Too small
+    # Toroidal faces are strong evidence for a fillet/rounded corner.
+    for info in faces:
+        if info["type"] != "toroidal":
+            continue
+        key = info["face_id"]
+        feature = _base_feature(
+            "fillet",
+            key,
+            tuple(info["centroid"]),
+            0.82,
+            "toroidal_surface_with_adjacency",
+            {
+                "surface": "torus",
+                "minor_radius_mm": _round(info["minor_radius"] * conversion_factor, 4),
+                "major_radius_mm": _round(info["major_radius"] * conversion_factor, 4),
+                "adjacent_face_ids": [faces[j]["face_id"] for j in adjacency[faces.index(info)]],
+            },
+            axis=tuple(info["axis"].values()),
+            faces=[info["face_id"]],
+            dimensions={"corner_radius": _round(info["minor_radius"] * conversion_factor, 4)},
+            accessibility="good",
+        )
+        if feature["feature_id"] not in used_ids:
+            used_ids.add(feature["feature_id"])
+            features.append(feature)
+
+    # Planar faces with several adjacent walls are pocket/step evidence.  The
+    # face area and inner-loop count distinguish a pocket bottom from an
+    # external top face.
+    planar_indices = [i for i, info in enumerate(faces) if info["type"] == "planar"]
+    if planar_indices:
+        max_planar_area = max(faces[i]["area"] for i in planar_indices)
+    else:
+        max_planar_area = 0.0
+    for index in planar_indices:
+        info = faces[index]
+        neighbours = adjacency[index]
+        planar_neighbours = [j for j in neighbours if faces[j]["type"] == "planar"]
+        wall_neighbours = [
+            j for j in neighbours if faces[j]["type"] in {"planar", "cylindrical", "conical"}
+        ]
+        # A recessed bottom is smaller than the main exterior plane and has
+        # multiple walls.  Require at least three wall neighbours to avoid
+        # calling an ordinary block face a pocket.
+        if len(wall_neighbours) >= 3 and info["area"] < max_planar_area * 0.9:
+            # A planar face on the outside boundary of the solid is an
+            # exterior wall, not a pocket bottom.  Recessed bottoms lie at
+            # an interior offset along their own normal.
+            normal = tuple(info["normal"].values())
+            offset = _projection(tuple(info["origin"].values()), normal)
+            projections = [
+                _projection(corner, normal) for corner in _bbox_corners(shape_low, shape_high)
+            ]
+            boundary_tolerance = max(0.05 * conversion_factor, 0.05)
+            if (
+                abs(offset - min(projections)) <= boundary_tolerance
+                or abs(offset - max(projections)) <= boundary_tolerance
+            ):
                 continue
-
-            wires = _get_face_wires(face)
-            num_wires = len(wires)
-
-            # Determine if this is a pocket bottom (has walls around it)
-            adjacent_walls = 0
-            adjacent_wall_types = []
-            for other_fid, other_face in face_map.items():
-                if other_fid == fid:
+            # A pocket bottom has a larger parallel opening plane above it.
+            # This excludes the vertical walls of a slot/pocket (which also
+            # have several neighbours) and avoids counting ordinary blocks.
+            parallel_opening = False
+            for other_index in planar_indices:
+                if other_index == index:
                     continue
-                if _faces_share_edge(face, other_face):
-                    otype = face_classifications[other_fid].get("type")
-                    adjacent_walls += 1
-                    adjacent_wall_types.append(otype)
-
-            # Pocket detection: planar face surrounded by walls (cylindrical or planar)
-            if adjacent_walls >= 3:
-                # Determine pocket type based on boundary
-                boundary_cylindrical = sum(
-                    1 for t in adjacent_wall_types if t == "cylindrical"
-                )
-                boundary_planar = sum(
-                    1 for t in adjacent_wall_types if t == "planar"
-                )
-
-                if boundary_cylindrical > 0 and boundary_planar == 0:
-                    pocket_type = FeatureType.POCKET_CIRCULAR
-                elif boundary_cylindrical == 0 and boundary_planar >= 3:
-                    pocket_type = FeatureType.POCKET_RECTANGULAR
-                else:
-                    pocket_type = FeatureType.POCKET_COMPLEX
-
-                # Estimate pocket depth from adjacent walls
-                pocket_depth = None
-                for wall_fid in [f for f, _ in []]:  # placeholder
-                    pass
-
-                feature = Feature(
-                    feature_id=f"F-{uuid4().hex[:6].upper()}",
-                    type=pocket_type,
-                    subtype="pocket",
-                    position=_face_center(face),
-                    dimensions=FeatureDimensions(
-                        width=None,
-                        length=None,
-                        depth=pocket_depth,
+                other = faces[other_index]
+                other_normal = tuple(other["normal"].values())
+                if abs(sum(a * b for a, b in zip(normal, other_normal))) < 0.99:
+                    continue
+                other_offset = _projection(tuple(other["origin"].values()), normal)
+                if abs(other_offset - offset) <= boundary_tolerance:
+                    continue
+                if other["area"] > info["area"] * 1.15:
+                    parallel_opening = True
+                    break
+            if not parallel_opening:
+                continue
+            # A pocket bottom is bounded by the recess walls, not by the
+            # much larger exterior face that happens to be adjacent to one
+            # of those walls.
+            if any(faces[j]["area"] > info["area"] * 1.15 for j in neighbours):
+                continue
+            low, high = info["bbox"]["min"], info["bbox"]["max"]
+            dx = high["x"] - low["x"]
+            dy = high["y"] - low["y"]
+            aspect = max(dx, dy) / max(min(dx, dy), 1e-6)
+            feature_type = (
+                "open_slot"
+                if aspect >= 3.0
+                else ("rectangular_pocket" if planar_neighbours else "complex_pocket")
+            )
+            key = f"{info['face_id']}|{low['x']:.3f},{low['y']:.3f},{low['z']:.3f}"
+            feature = _base_feature(
+                feature_type,
+                key,
+                tuple(info["centroid"]),
+                0.70,
+                "planar_bottom_adjacency",
+                {
+                    "surface": "plane",
+                    "face_area_mm2": _round(
+                        info["area"] * conversion_factor * conversion_factor, 4
                     ),
-                    faces=[fid],
-                    edges=[],
-                    open=False,
-                    through=False,
-                    accessibility=FeatureAccessibility(
-                        approach_vectors=[_face_normal_at_center(face)],
-                        collision_risk="limited",
-                    ),
-                    confidence=0.75,
-                    detection_method=DetectionMethod.CLOSED_LOOP_PLANAR_BOTTOM,
-                    warnings=[],
-                )
+                    "adjacent_face_ids": [faces[j]["face_id"] for j in neighbours],
+                    "wall_neighbour_count": len(wall_neighbours),
+                    "aspect_ratio": _round(aspect, 3),
+                },
+                axis=tuple(info["normal"].values()),
+                faces=[info["face_id"]],
+                dimensions={
+                    "width": _round(dx * conversion_factor, 4),
+                    "length": _round(dy * conversion_factor, 4),
+                },
+                accessibility="limited",
+                subtype="recess",
+            )
+            if feature["feature_id"] not in used_ids:
+                used_ids.add(feature["feature_id"])
                 features.append(feature)
 
-            # Step/Shoulder detection: planar face at different height than neighbor
-            elif adjacent_walls >= 1 and num_wires == 1:
-                # Check height difference with adjacent planar faces
-                origin, normal = _plane_origin_normal(face)
-                for other_fid in face_ids:
-                    if other_fid == fid:
-                        continue
-                    other_face = face_map[other_fid]
-                    if not _faces_share_edge(face, other_face):
-                        continue
-                    other_origin, other_normal = _plane_origin_normal(other_face)
-                    # Check if normals are parallel (same plane orientation)
-                    if _are_axes_parallel(normal, other_normal):
-                        height_diff = abs(origin.z - other_origin.z)
-                        if height_diff > 0.5 * conversion:
-                            feature = Feature(
-                                feature_id=f"F-{uuid4().hex[:6].upper()}",
-                                type=FeatureType.STEP,
-                                subtype="step",
-                                position=_face_center(face),
-                                dimensions=FeatureDimensions(
-                                    height=round(height_diff * conversion, 3),
-                                ),
-                                faces=[fid, other_fid],
-                                edges=[],
-                                open=False,
-                                through=False,
-                                accessibility=FeatureAccessibility(
-                                    approach_vectors=[normal],
-                                    collision_risk="good",
-                                ),
-                                confidence=0.8,
-                                detection_method=DetectionMethod.FACE_ADJACENCY_HEIGHT_DELTA,
-                                warnings=[],
-                            )
-                            features.append(feature)
-                            break
-
-    # =========================================================================
-    # 5. Boss Detection (protruding cylindrical or planar features)
-    # =========================================================================
-    # A boss is a cylindrical protrusion - similar to a hole but positive
-    # We detect cylindrical faces that are convex (outside) rather than concave (inside)
-    # Simplified: cylindrical faces not adjacent to planar caps on both sides
-
-    # =========================================================================
-    # 6. Feature Relationships - Pattern Detection
-    # =========================================================================
-    hole_features = [
-        f for f in features
-        if f.type in (FeatureType.THROUGH_HOLE, FeatureType.BLIND_HOLE,
-                      FeatureType.COUNTERBORE, FeatureType.COUNTERSINK,
-                      FeatureType.TAPPED_HOLE_CANDIDATE)
-    ]
-
-    if len(hole_features) >= 2:
-        # Group by axis direction for pattern detection
-        pattern_groups: dict[str, list[Feature]] = {}
-        for hf in hole_features:
-            if hf.axis:
-                key = f"{round(hf.axis.x, 2)}_{round(hf.axis.y, 2)}_{round(hf.axis.z, 2)}"
-                if key not in pattern_groups:
-                    pattern_groups[key] = []
-                pattern_groups[key].append(hf)
-
-        for pkey, pfeatures in pattern_groups.items():
-            if len(pfeatures) >= 2:
-                # Sort by position along primary axis
-                pfeatures.sort(key=lambda f: f.position.x + f.position.y + f.position.z)
-                positions = [f.position.x + f.position.y + f.position.z for f in pfeatures]
-                spacings = [positions[i + 1] - positions[i] for i in range(len(positions) - 1)]
-
-                if spacings and all(abs(s - spacings[0]) < 0.5 * conversion for s in spacings):
-                    pattern_id = f"PG-{uuid4().hex[:4].upper()}"
-                    for pf in pfeatures:
-                        pf.pattern_group = pattern_id
-                    relationships.append(FeatureRelationship(
-                        type=RelationshipType.PATTERN,
-                        pattern_id=pattern_id,
-                        pattern_type="linear",
-                        features=[pf.feature_id for pf in pfeatures],
-                        spacing=round(spacings[0], 3) if spacings else None,
-                        details={"count": len(pfeatures), "axis": pkey},
-                    ))
-
-    # =========================================================================
-    # 7. Symmetry Detection
-    # =========================================================================
-    # Simple symmetry check: features mirrored across principal planes
-    symmetry_relationships = _detect_symmetry(features, conversion)
-    relationships.extend(symmetry_relationships)
-
-    return features, relationships, warnings
-
-
-def _detect_symmetry(features: list[Feature], conversion: float) -> list[FeatureRelationship]:
-    """Detect symmetrical feature pairs."""
-    relationships = []
-
-    # Check for features mirrored across XY plane (z -> -z)
-    for i, f1 in enumerate(features):
-        if not f1.axis or not f1.position:
-            continue
-        for f2 in features[i + 1:]:
-            if not f2.axis or not f2.position:
+    # Steps/shoulders are evidenced by two parallel planar faces at different
+    # offsets.  This is deliberately conservative to avoid manufacturing a
+    # step for every coplanar duplicate.
+    for i, first in enumerate(planar_indices):
+        first_info = faces[first]
+        first_normal = tuple(first_info["normal"].values())
+        first_axis = _normalise_axis(first_normal)
+        first_offset = _projection(tuple(first_info["origin"].values()), first_axis)
+        for second in planar_indices[i + 1 :]:
+            second_info = faces[second]
+            second_axis = _normalise_axis(tuple(second_info["normal"].values()))
+            if sum(a * b for a, b in zip(first_axis, second_axis)) < 0.999:
                 continue
-            # Check if same type and mirrored position
-            if f1.type == f2.type:
-                # Mirror across XY (z sign flip)
-                if (abs(f1.position.x - f2.position.x) < 0.5 * conversion and
-                        abs(f1.position.y - f2.position.y) < 0.5 * conversion and
-                        abs(f1.position.z + f2.position.z) < 0.5 * conversion):
-                    relationships.append(FeatureRelationship(
-                        type=RelationshipType.SYMMETRY,
-                        features=[f1.feature_id, f2.feature_id],
-                        details={"symmetry_plane": "XY", "mirror_axis": "Z"},
-                    ))
-                    break
+            second_offset = _projection(tuple(second_info["origin"].values()), first_axis)
+            if abs(second_offset - first_offset) <= max(0.25 * conversion_factor, 0.1):
+                continue
+            if not any(j in adjacency[first] for j in [second]) and not any(
+                j in adjacency[second] for j in [first]
+            ):
+                continue
+            key = f"{first_info['face_id']}|{second_info['face_id']}"
+            feature = _base_feature(
+                "step",
+                key,
+                tuple(first_info["centroid"]),
+                0.68,
+                "parallel_plane_offset_and_adjacency",
+                {
+                    "surface": "parallel_planes",
+                    "offset_delta_mm": _round(
+                        abs(second_offset - first_offset) * conversion_factor, 4
+                    ),
+                    "adjacent_face_ids": [first_info["face_id"], second_info["face_id"]],
+                },
+                axis=first_axis,
+                faces=[first_info["face_id"], second_info["face_id"]],
+                dimensions={
+                    "height": _round(abs(second_offset - first_offset) * conversion_factor, 4)
+                },
+                accessibility="good",
+                subtype="shoulder",
+            )
+            if feature["feature_id"] not in used_ids:
+                used_ids.add(feature["feature_id"])
+                features.append(feature)
 
-    return relationships
+    # --- Build the analysis payload ---------------------------------------
+    def _count_topology(target: Any, kind: Any) -> int:
+        count = 0
+        explorer = TopExp_Explorer(target, kind)
+        while explorer.More():
+            count += 1
+            explorer.Next()
+        return count
+
+    volume_props = GProp_GProps()
+    BRepGProp.VolumeProperties_s(shape, volume_props)
+    total_volume = float(volume_props.Mass())
+    centre = volume_props.CentreOfMass()
+    surface_area = sum(float(item["area"]) for item in faces)
+    geometry_summary = {
+        "num_bodies": _count_topology(shape, TopAbs_SOLID),
+        "num_shells": _count_topology(shape, TopAbs_SHELL),
+        "num_faces": len(faces),
+        "num_edges": _count_topology(shape, TopAbs_EDGE),
+        "num_vertices": _count_topology(shape, TopAbs_VERTEX),
+        "volume": _round(total_volume),
+        "surface_area": _round(surface_area),
+        "bbox": {"min": shape_low, "max": shape_high},
+        "center_of_mass": _vec(centre.X(), centre.Y(), centre.Z()),
+    }
+
+    bodies: list[dict[str, Any]] = []
+    body_explorer = TopExp_Explorer(shape, TopAbs_SOLID)
+    while body_explorer.More():
+        solid = body_explorer.Current()
+        bprops = GProp_GProps()
+        BRepGProp.VolumeProperties_s(solid, bprops)
+        bcentre = bprops.CentreOfMass()
+        low, high = _bbox(solid)
+        bodies.append(
+            {
+                "body_id": f"body_{len(bodies):03d}",
+                "volume": _round(float(bprops.Mass())),
+                "surface_area": _round(sum(float(item["area"]) for item in faces)),
+                "bbox": {"min": low, "max": high},
+                "center_of_mass": _vec(bcentre.X(), bcentre.Y(), bcentre.Z()),
+                "num_faces": _count_topology(solid, TopAbs_FACE),
+            }
+        )
+        body_explorer.Next()
+
+    # Deduplicate by stable ID and by an equivalent geometric key.  A STEP
+    # import can contain duplicate faces from a compound or seam.
+    unique: dict[str, dict[str, Any]] = {}
+    for feature in features:
+        unique.setdefault(feature["feature_id"], feature)
+    feature_list = list(unique.values())
+
+    return {
+        "units": units,
+        "warnings": warnings,
+        "geometry_summary": geometry_summary,
+        "solid_bodies": bodies,
+        "bodies": bodies,
+        "faces": faces,
+        "raw_features": feature_list,
+        "features": feature_list,
+    }
 
 
-def run_feature_recognition(cad_specs: CADSpecs) -> CADSpecs:
-    """Run feature recognition on existing CAD specs (placeholder for re-processing)."""
-    logger.info(f"Feature recognition: {len(cad_specs.features)} features already detected")
+def run_feature_recognition(cad_specs: Any) -> Any:
+    """Compatibility wrapper for the original scaffold."""
+
+    if hasattr(cad_specs, "features"):
+        cad_specs.features = (
+            recognize_features(cad_specs.shape)
+            if hasattr(cad_specs, "shape")
+            else cad_specs.features
+        )
     return cad_specs

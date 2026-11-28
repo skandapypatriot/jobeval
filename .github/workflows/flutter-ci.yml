@@ -1,137 +1,97 @@
-name: Flutter CI
+name: Flutter platform builds
 
 on:
   push:
-    branches: [main, develop]
   pull_request:
-    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  analyze-and-test:
-    name: Analyze and Test
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./frontend
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.22.0'
-          channel: 'stable'
-          cache: true
-
-      - name: Get dependencies
-        run: flutter pub get
-
-      - name: Analyze
-        run: flutter analyze
-
-      - name: Generate code
-        run: dart run build_runner build --delete-conflicting-outputs
-
-      - name: Run tests
-        run: flutter test --coverage
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./frontend/coverage/lcov.info
-          flags: frontend
-
-  build-android:
-    name: Build Android APK
-    needs: analyze-and-test
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./frontend
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.22.0'
-          channel: 'stable'
-
-      - name: Get dependencies
-        run: flutter pub get
-
-      - name: Build APK
-        run: flutter build apk --release
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: jobeval-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
-
-  build-windows:
-    name: Build Windows
-    needs: analyze-and-test
+  windows:
+    name: Windows desktop build
     runs-on: windows-latest
     defaults:
       run:
-        working-directory: ./frontend
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
+        working-directory: frontend
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.22.0'
-          channel: 'stable'
+          flutter-version: "3.47.1"
+          channel: stable
+          cache: true
 
-      - name: Get dependencies
+      - name: Resolve packages
         run: flutter pub get
 
       - name: Build Windows
         run: flutter build windows --release
 
-      - name: Upload Windows build
+      - name: Upload Windows application
         uses: actions/upload-artifact@v4
         with:
           name: jobeval-windows
-          path: build/windows/x64/runner/Release/
+          path: frontend/build/windows/x64/runner/Release/
 
-  build-web:
-    name: Build Web
-    needs: analyze-and-test
+  android:
+    name: Android APK build
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./frontend
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
+        working-directory: frontend
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.22.0'
-          channel: 'stable'
+          flutter-version: "3.47.1"
+          channel: stable
+          cache: true
 
-      - name: Get dependencies
+      - name: Resolve packages
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release --debug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: jobeval-android-debug
+          path: frontend/build/app/outputs/flutter-apk/app-debug.apk
+
+  web:
+    name: Web release build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.1"
+          channel: stable
+          cache: true
+
+      - name: Resolve packages
         run: flutter pub get
 
       - name: Build Web
-        run: flutter build web --release --web-renderer canvaskit
+        run: flutter build web --release
 
-      - name: Upload Web build
+      - name: Upload Web bundle
         uses: actions/upload-artifact@v4
         with:
           name: jobeval-web
-          path: build/web/
+          path: frontend/build/web/

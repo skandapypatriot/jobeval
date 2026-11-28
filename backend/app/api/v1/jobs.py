@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
-from app.schemas.cad_specs import ProjectSummary, ProjectDetail, CreateProjectRequest
+from app.schemas.cad_specs import CreateProjectRequest, ProjectDetail, ProjectSummary
 
 router = APIRouter(prefix="/projects", tags=["Jobs"])
 
