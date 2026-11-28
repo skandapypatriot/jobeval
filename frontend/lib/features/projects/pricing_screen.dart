@@ -23,19 +23,59 @@ class _PricingScreenState extends ConsumerState<PricingScreen> {
   Widget build(BuildContext context) {
     final pricing = ref.watch(projectPricingProvider(widget.projectId));
     final estimate = ref.watch(estimateProvider(widget.projectId));
+    final analysis = ref.watch(analysisProvider(widget.projectId));
     final currentEstimate = _estimateOverride ?? estimate.valueOrNull;
 
+    // Automatic dimension detection: prefer saved estimate, then CAD analysis geometry.
     final finishedBBox = currentEstimate != null
         ? JsonData.firstMap(currentEstimate, const [
             'finished_bbox',
             'finished_dimensions',
             'finished_dimensions_mm',
           ])
-        : <String, dynamic>{};
+        : analysis.when(
+            data: (data) => JsonData.firstMap(data, const [
+              'finished_bbox',
+              'geometry_summary',
+              'geometry',
+            ]),
+            loading: () => <String, dynamic>{},
+            error: (_, __) => <String, dynamic>{},
+          );
     final finishedSize = finishedBBox['size'] as Map? ?? {};
-    final finishedX = (finishedSize['x'] as num?) ?? 0.0;
-    final finishedY = (finishedSize['y'] as num?) ?? 0.0;
-    final finishedZ = (finishedSize['z'] as num?) ?? 0.0;
+    final finishedX = (finishedSize['x'] as num?)?.toDouble() ?? 0.0;
+    final finishedY = (finishedSize['y'] as num?)?.toDouble() ?? 0.0;
+    final finishedZ = (finishedSize['z'] as num?)?.toDouble() ?? 0.0;
+
+    // If the bbox is nested as {min: {...}, max: {...}}, compute size from it.
+    late final double effectiveFinishedX;
+    late final double effectiveFinishedY;
+    late final double effectiveFinishedZ;
+    if (finishedSize.isEmpty && finishedBBox.containsKey('bbox')) {
+      final bbox = finishedBBox['bbox'] as Map?;
+      final low = bbox?['min'] as Map? ?? {};
+      final high = bbox?['max'] as Map? ?? {};
+      effectiveFinishedX = ((high['x'] as num?)?.toDouble() ?? 0.0) -
+          ((low['x'] as num?)?.toDouble() ?? 0.0);
+      effectiveFinishedY = ((high['y'] as num?)?.toDouble() ?? 0.0) -
+          ((low['y'] as num?)?.toDouble() ?? 0.0);
+      effectiveFinishedZ = ((high['z'] as num?)?.toDouble() ?? 0.0) -
+          ((low['z'] as num?)?.toDouble() ?? 0.0);
+    } else {
+      effectiveFinishedX = finishedX;
+      effectiveFinishedY = finishedY;
+      effectiveFinishedZ = finishedZ;
+    }
+
+    final allowances = currentEstimate != null
+        ? JsonData.firstMap(currentEstimate, const [
+            'allowances',
+            'allowance_mm',
+          ])
+        : <String, dynamic>{};
+    final allowanceX = (allowances['x'] as num?)?.toDouble() ?? 2.0;
+    final allowanceY = (allowances['y'] as num?)?.toDouble() ?? 2.0;
+    final allowanceZ = (allowances['z'] as num?)?.toDouble() ?? 2.0;
 
     final stockDims = currentEstimate != null
         ? JsonData.firstMap(currentEstimate, const [
@@ -45,19 +85,16 @@ class _PricingScreenState extends ConsumerState<PricingScreen> {
           ])
         : <String, dynamic>{};
     final stockSize = stockDims['size'] as Map? ?? {};
-    final stockX = (stockSize['x'] as num?) ?? 0.0;
-    final stockY = (stockSize['y'] as num?) ?? 0.0;
-    final stockZ = (stockSize['z'] as num?) ?? 0.0;
-
-    final allowances = currentEstimate != null
-        ? JsonData.firstMap(currentEstimate, const [
-            'allowances',
-            'allowance_mm',
-          ])
-        : <String, dynamic>{};
-    final allowanceX = (allowances['x'] as num?) ?? 2.0;
-    final allowanceY = (allowances['y'] as num?) ?? 2.0;
-    final allowanceZ = (allowances['z'] as num?) ?? 2.0;
+    // Auto-calculate stock envelope from finished + allowance when no estimate exists.
+    final effectiveStockX = stockSize.isNotEmpty
+        ? (stockSize['x'] as num?)?.toDouble() ?? 0.0
+        : effectiveFinishedX + 2 * allowanceX;
+    final effectiveStockY = stockSize.isNotEmpty
+        ? (stockSize['y'] as num?)?.toDouble() ?? 0.0
+        : effectiveFinishedY + 2 * allowanceY;
+    final effectiveStockZ = stockSize.isNotEmpty
+        ? (stockSize['z'] as num?)?.toDouble() ?? 0.0
+        : effectiveFinishedZ + 2 * allowanceZ;
 
     return ResponsiveBody(
       child: Column(
@@ -115,17 +152,17 @@ class _PricingScreenState extends ConsumerState<PricingScreen> {
               children: [
                 _DimensionRow(
                   title: 'Finished dimensions (mm)',
-                  x: finishedX,
-                  y: finishedY,
-                  z: finishedZ,
+                  x: effectiveFinishedX,
+                  y: effectiveFinishedY,
+                  z: effectiveFinishedZ,
                   label: 'From CAD model',
                 ),
                 const SizedBox(height: 12),
                 _DimensionRow(
                   title: 'Stock envelope (finished + allowance)',
-                  x: stockX,
-                  y: stockY,
-                  z: stockZ,
+                  x: effectiveStockX,
+                  y: effectiveStockY,
+                  z: effectiveStockZ,
                   label: 'Required stock',
                 ),
                 const SizedBox(height: 12),
