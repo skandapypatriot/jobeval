@@ -2,14 +2,13 @@
 
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
-from app.services.drawing_service import DrawingService
 from app.services.cross_validation_service import CrossValidationService
+from app.services.drawing_service import DrawingService
 
 router = APIRouter()
 
@@ -54,7 +53,9 @@ async def process_drawing(
             "gd_t_found": sum(len(p.gd_t) for p in annotations.pages),
             "surface_finish_found": sum(len(p.surface_finish) for p in annotations.pages),
             "notes_found": sum(len(p.notes) for p in annotations.pages),
-            "title_block": annotations.pages[0].title_block.model_dump() if annotations.pages and annotations.pages[0].title_block else None,
+            "title_block": annotations.pages[0].title_block.model_dump()
+            if annotations.pages and annotations.pages[0].title_block
+            else None,
         }
     except Exception as e:
         raise HTTPException(

@@ -5,13 +5,12 @@ import json
 import logging
 import time
 from typing import Any
-from uuid import UUID
 
 import httpx
 from pydantic import ValidationError
 
 from app.core.config import get_settings
-from app.schemas.cad_specs import CADSpecs, ConfidenceReport, WarningItem
+from app.schemas.cad_specs import CADSpecs
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -240,11 +239,15 @@ Your analysis will be validated against the original CAD geometry. Any unsupport
         base_context = {
             "job_id": cad_specs.job_id,
             "units": cad_specs.units.model_dump() if cad_specs.units else None,
-            "geometry_summary": cad_specs.geometry_summary.model_dump() if cad_specs.geometry_summary else None,
+            "geometry_summary": cad_specs.geometry_summary.model_dump()
+            if cad_specs.geometry_summary
+            else None,
             "features": [f.model_dump() for f in cad_specs.features],
             "feature_relationships": [r.model_dump() for r in cad_specs.feature_relationships],
             "warnings": [w.model_dump() for w in cad_specs.warnings],
-            "confidence_report": cad_specs.confidence_report.model_dump() if cad_specs.confidence_report else None,
+            "confidence_report": cad_specs.confidence_report.model_dump()
+            if cad_specs.confidence_report
+            else None,
         }
 
         if prompt_type == "feature_explanation":
@@ -276,8 +279,12 @@ Respond with JSON containing:
 
         elif prompt_type == "drawing_interpretation":
             drawing_context = {
-                "drawing_annotations": cad_specs.drawing_annotations.model_dump() if cad_specs.drawing_annotations else None,
-                "cross_validation": cad_specs.cross_validation.model_dump() if cad_specs.cross_validation else None,
+                "drawing_annotations": cad_specs.drawing_annotations.model_dump()
+                if cad_specs.drawing_annotations
+                else None,
+                "cross_validation": cad_specs.cross_validation.model_dump()
+                if cad_specs.cross_validation
+                else None,
             }
             return f"""Interpret the engineering drawing annotations and cross-validation results.
 Identify discrepancies, missing information, and critical specifications.
@@ -363,9 +370,13 @@ Respond with JSON containing:
         """Compute hash of CAD specs for caching LLM responses."""
         content = json.dumps(
             {
-                "geometry_summary": cad_specs.geometry_summary.model_dump() if cad_specs.geometry_summary else None,
+                "geometry_summary": cad_specs.geometry_summary.model_dump()
+                if cad_specs.geometry_summary
+                else None,
                 "features": [f.model_dump() for f in cad_specs.features],
-                "drawing_annotations": cad_specs.drawing_annotations.model_dump() if cad_specs.drawing_annotations else None,
+                "drawing_annotations": cad_specs.drawing_annotations.model_dump()
+                if cad_specs.drawing_annotations
+                else None,
             },
             sort_keys=True,
         )

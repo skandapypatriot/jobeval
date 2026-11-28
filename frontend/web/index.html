@@ -1,33 +1,16 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta content="width=device-width, initial-scale=1.0" name="viewport">
+    <base href="$FLUTTER_BASE_HREF">
+    <meta name="description" content="JobEval CAD analysis and manufacturing estimate workspace">
+    <meta name="theme-color" content="#18324A">
+    <link rel="manifest" href="manifest.json">
     <title>JobEval</title>
-    <meta name="description" content="Intelligent CAD Analysis & CNC Cost Estimation">
-    
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    colors: {
-                        jobeval: {
-                            50: '#eff6ff',
-                            100: '#dbeafe',
-                            500: '#3b82f6',
-                            600: '#2563eb',
-                            900: '#1e3a8a',
-                        }
-                    }
-                }
-            }
-        }
-    </script>
-    
-    <script src="flutter.js"></script>
 </head>
 <body>
     <div id="flutter-target"></div>
+    <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

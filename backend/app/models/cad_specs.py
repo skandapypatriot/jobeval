@@ -4,7 +4,8 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import DateTime, ForeignKey, Index, func
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -81,9 +82,7 @@ class ManufacturingAnalysis(Base):
     # Relationships
     project: Mapped["Project"] = relationship("Project", back_populates="manufacturing_analysis")
 
-    __table_args__ = (
-        Index("idx_manufacturing_analysis_project_id", "project_id"),
-    )
+    __table_args__ = (Index("idx_manufacturing_analysis_project_id", "project_id"),)
 
 
 class CostEstimate(Base):
@@ -117,9 +116,7 @@ class CostEstimate(Base):
     # Relationships
     project: Mapped["Project"] = relationship("Project", back_populates="cost_estimates")
 
-    __table_args__ = (
-        Index("idx_cost_estimates_project_id", "project_id"),
-    )
+    __table_args__ = (Index("idx_cost_estimates_project_id", "project_id"),)
 
 
 class Report(Base):
@@ -154,6 +151,4 @@ class Report(Base):
     # Relationships
     project: Mapped["Project"] = relationship("Project", back_populates="reports")
 
-    __table_args__ = (
-        Index("idx_reports_project_id", "project_id"),
-    )
+    __table_args__ = (Index("idx_reports_project_id", "project_id"),)

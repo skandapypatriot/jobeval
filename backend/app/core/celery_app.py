@@ -45,13 +45,15 @@ def create_celery_app() -> Celery:
     )
 
     # Auto-discover tasks
-    celery_app.autodiscover_tasks([
-        "app.workers.cad_tasks",
-        "app.workers.drawing_tasks",
-        "app.workers.manufacturing_tasks",
-        "app.workers.llm_tasks",
-        "app.workers.maintenance_tasks",
-    ])
+    celery_app.autodiscover_tasks(
+        [
+            "app.workers.cad_tasks",
+            "app.workers.drawing_tasks",
+            "app.workers.manufacturing_tasks",
+            "app.workers.llm_tasks",
+            "app.workers.maintenance_tasks",
+        ]
+    )
 
     return celery_app
 

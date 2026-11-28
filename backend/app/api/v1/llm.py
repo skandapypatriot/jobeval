@@ -1,9 +1,8 @@
 """LLM integration API endpoints."""
 
 from typing import Any
-from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, HTTPException, status
 
 from app.services.llm_service import LLMService
 

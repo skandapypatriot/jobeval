@@ -2,12 +2,11 @@
 
 import logging
 import re
-from typing import Any
-from uuid import uuid4
 
 from app.core.config import get_settings
-from app.models.material import Material as MaterialModel, MaterialPricing as MaterialPricingModel
-from app.schemas.cad_specs import Material, MaterialPricing, BoundingBox3D, Vector3D
+from app.models.material import Material as MaterialModel
+from app.models.material import MaterialPricing as MaterialPricingModel
+from app.schemas.cad_specs import BoundingBox3D, Material, MaterialPricing, Vector3D
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -185,7 +184,8 @@ class MaterialService:
         """Search materials by name, grade, or category."""
         query_lower = query.lower()
         return [
-            m for m in self._material_db.values()
+            m
+            for m in self._material_db.values()
             if query_lower in m.name.lower()
             or query_lower in (m.grade or "").lower()
             or query_lower in m.category.lower()

@@ -1,26 +1,23 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:jobeval/features/dashboard/dashboard_screen.dart';
-import 'package:jobeval/features/cad_upload/cad_upload_screen.dart';
-import 'package:jobeval/features/cad_viewer/cad_viewer_screen.dart';
-import 'package:jobeval/features/feature_recognition/feature_recognition_screen.dart';
-import 'package:jobeval/features/drawing_analysis/drawing_analysis_screen.dart';
-import 'package:jobeval/features/cnc_analysis/cnc_analysis_screen.dart';
-import 'package:jobeval/features/material_database/material_database_screen.dart';
-import 'package:jobeval/features/cost_estimation/cost_estimation_screen.dart';
-import 'package:jobeval/features/reports/reports_screen.dart';
+import 'package:jobeval/features/projects/cross_validation_screen.dart';
+import 'package:jobeval/features/projects/drawings_screen.dart';
+import 'package:jobeval/features/projects/features_screen.dart';
+import 'package:jobeval/features/projects/files_screen.dart';
+import 'package:jobeval/features/projects/geometry_screen.dart';
+import 'package:jobeval/features/projects/manufacturing_screen.dart';
+import 'package:jobeval/features/projects/pricing_screen.dart';
+import 'package:jobeval/features/projects/project_overview_screen.dart';
+import 'package:jobeval/features/projects/report_screen.dart';
+import 'package:jobeval/features/projects/upload_screen.dart';
 import 'package:jobeval/features/settings/settings_screen.dart';
-import 'package:jobeval/features/chat/chat_screen.dart';
-import 'package:jobeval/features/dashboard/widgets/project_card.dart';
-import 'package:jobeval/core/models/models.dart';
 
 final appRouter = GoRouter(
   initialLocation: '/',
   routes: [
     ShellRoute(
-      builder: (context, state, child) {
-        return MainShell(child: child);
-      },
+      builder: (context, state, child) => MainShell(child: child),
       routes: [
         GoRoute(
           path: '/',
@@ -28,83 +25,9 @@ final appRouter = GoRouter(
           builder: (context, state) => const DashboardScreen(),
         ),
         GoRoute(
-          path: '/upload',
-          name: 'upload',
-          builder: (context, state) => const CadUploadScreen(),
-        ),
-        GoRoute(
-          path: '/project/:projectId',
-          name: 'project',
-          builder: (context, state) {
-            final projectId = state.pathParameters['projectId']!;
-            return ProjectShell(projectId: projectId, child: const SizedBox.shrink());
-          },
-          routes: [
-            GoRoute(
-              path: 'viewer',
-              name: 'viewer',
-              builder: (context, state) {
-                final projectId = state.pathParameters['projectId']!;
-                return CadViewerScreen(projectId: projectId);
-              },
-            ),
-            GoRoute(
-              path: 'features',
-              name: 'features',
-              builder: (context, state) {
-                final projectId = state.pathParameters['projectId']!;
-                return FeatureRecognitionScreen(projectId: projectId);
-              },
-            ),
-            GoRoute(
-              path: 'drawing',
-              name: 'drawing',
-              builder: (context, state) {
-                final projectId = state.pathParameters['projectId']!;
-                return DrawingAnalysisScreen(projectId: projectId);
-              },
-            ),
-            GoRoute(
-              path: 'manufacturing',
-              name: 'manufacturing',
-              builder: (context, state) {
-                final projectId = state.pathParameters['projectId']!;
-                return CncAnalysisScreen(projectId: projectId);
-              },
-            ),
-            GoRoute(
-              path: 'materials',
-              name: 'materials',
-              builder: (context, state) {
-                final projectId = state.pathParameters['projectId']!;
-                return MaterialDatabaseScreen(projectId: projectId);
-              },
-            ),
-            GoRoute(
-              path: 'cost',
-              name: 'cost',
-              builder: (context, state) {
-                final projectId = state.pathParameters['projectId']!;
-                return CostEstimationScreen(projectId: projectId);
-              },
-            ),
-            GoRoute(
-              path: 'reports',
-              name: 'reports',
-              builder: (context, state) {
-                final projectId = state.pathParameters['projectId']!;
-                return ReportsScreen(projectId: projectId);
-              },
-            ),
-            GoRoute(
-              path: 'chat',
-              name: 'chat',
-              builder: (context, state) {
-                final projectId = state.pathParameters['projectId']!;
-                return ChatScreen(projectId: projectId);
-              },
-            ),
-          ],
+          path: '/dashboard',
+          name: 'dashboard-alias',
+          builder: (context, state) => const DashboardScreen(),
         ),
         GoRoute(
           path: '/settings',
@@ -113,188 +36,318 @@ final appRouter = GoRouter(
         ),
       ],
     ),
+    ShellRoute(
+      builder: (context, state, child) {
+        final projectId = state.pathParameters['projectId']!;
+        return ProjectShell(projectId: projectId, child: child);
+      },
+      routes: [
+        GoRoute(
+          path: '/projects/:projectId',
+          name: 'project',
+          redirect: (context, state) {
+            return state.uri.pathSegments.length == 2
+                ? '/projects/${state.pathParameters['projectId']}/overview'
+                : null;
+          },
+          builder: (context, state) => const SizedBox.shrink(),
+          routes: [
+            GoRoute(
+              path: 'overview',
+              name: 'project-overview',
+              builder: (context, state) => ProjectOverviewScreen(
+                projectId: state.pathParameters['projectId']!,
+              ),
+            ),
+            GoRoute(
+              path: 'files',
+              name: 'project-files',
+              builder: (context, state) => ProjectFilesScreen(
+                projectId: state.pathParameters['projectId']!,
+              ),
+            ),
+            GoRoute(
+              path: 'upload',
+              name: 'project-upload',
+              builder: (context, state) => ProjectUploadScreen(
+                projectId: state.pathParameters['projectId']!,
+              ),
+            ),
+            GoRoute(
+              path: 'geometry',
+              name: 'project-geometry',
+              builder: (context, state) => GeometryScreen(
+                projectId: state.pathParameters['projectId']!,
+              ),
+            ),
+            GoRoute(
+              path: 'features',
+              name: 'project-features',
+              builder: (context, state) => FeaturesScreen(
+                projectId: state.pathParameters['projectId']!,
+              ),
+            ),
+            GoRoute(
+              path: 'drawings',
+              name: 'project-drawings',
+              builder: (context, state) => DrawingsScreen(
+                projectId: state.pathParameters['projectId']!,
+              ),
+            ),
+            GoRoute(
+              path: 'cross-validation',
+              name: 'project-cross-validation',
+              builder: (context, state) => CrossValidationScreen(
+                projectId: state.pathParameters['projectId']!,
+              ),
+            ),
+            GoRoute(
+              path: 'manufacturing',
+              name: 'project-manufacturing',
+              builder: (context, state) => ManufacturingScreen(
+                projectId: state.pathParameters['projectId']!,
+              ),
+            ),
+            GoRoute(
+              path: 'pricing',
+              name: 'project-pricing',
+              builder: (context, state) => PricingScreen(
+                projectId: state.pathParameters['projectId']!,
+              ),
+            ),
+            GoRoute(
+              path: 'report',
+              name: 'project-report',
+              builder: (context, state) => ReportScreen(
+                projectId: state.pathParameters['projectId']!,
+              ),
+            ),
+          ],
+        ),
+      ],
+    ),
   ],
   errorBuilder: (context, state) => Scaffold(
     body: Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Icon(Icons.error_outline, size: 64, color: Colors.redAccent),
-          const SizedBox(height: 16),
-          Text(
-            'Page Not Found',
-            style: Theme.of(context).textTheme.headlineMedium,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 520),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.route_outlined,
+                size: 56,
+                color: Theme.of(context).colorScheme.error,
+              ),
+              const SizedBox(height: 14),
+              Text(
+                'Page not found',
+                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'The requested JobEval route is not available.',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 18),
+              FilledButton.icon(
+                onPressed: () => context.go('/'),
+                icon: const Icon(Icons.home_outlined),
+                label: const Text('Go to dashboard'),
+              ),
+            ],
           ),
-          const SizedBox(height: 8),
-          Text(
-            state.error?.toString() ?? 'Unknown error',
-            style: Theme.of(context).textTheme.bodyMedium,
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 24),
-          FilledButton.tonal(
-            onPressed: () => context.go('/'),
-            child: const Text('Go to Dashboard'),
-          ),
-        ],
+        ),
       ),
     ),
   ),
 );
 
-class MainShell extends StatefulWidget {
-  final Widget child;
-
+class MainShell extends StatelessWidget {
   const MainShell({super.key, required this.child});
 
-  @override
-  State<MainShell> createState() => _MainShellState();
-}
-
-class _MainShellState extends State<MainShell> {
-  int _selectedIndex = 0;
-
-  static const List<NavigationDestination> _destinations = [
-    NavigationDestination(
-      icon: Icon(Icons.dashboard_outlined),
-      selectedIcon: Icon(Icons.dashboard),
-      label: 'Dashboard',
-    ),
-    NavigationDestination(
-      icon: Icon(Icons.upload_file_outlined),
-      selectedIcon: Icon(Icons.upload_file),
-      label: 'Upload',
-    ),
-    NavigationDestination(
-      icon: Icon(Icons.settings_outlined),
-      selectedIcon: Icon(Icons.settings),
-      label: 'Settings',
-    ),
-  ];
-
-  void _onDestinationSelected(int index) {
-    setState(() => _selectedIndex = index);
-    switch (index) {
-      case 0:
-        context.go('/');
-        break;
-      case 1:
-        context.go('/upload');
-        break;
-      case 2:
-        context.go('/settings');
-        break;
-    }
-  }
+  final Widget child;
 
   @override
   Widget build(BuildContext context) {
-    final isWide = MediaQuery.of(context).size.width >= 600;
-
-    if (isWide) {
+    final location = GoRouterState.of(context).uri.path;
+    final selected = location.startsWith('/settings') ? 1 : 0;
+    final wide = MediaQuery.sizeOf(context).width >= 760;
+    if (wide) {
       return Scaffold(
         body: Row(
           children: [
             NavigationRail(
-              selectedIndex: _selectedIndex,
-              onDestinationSelected: _onDestinationSelected,
+              selectedIndex: selected,
+              onDestinationSelected: (index) {
+                context.go(index == 0 ? '/' : '/settings');
+              },
               labelType: NavigationRailLabelType.all,
-              backgroundColor: Theme.of(context).colorScheme.surface,
-              destinations: _destinations.map((d) => NavigationRailDestination(
-                icon: d.icon,
-                selectedIcon: d.selectedIcon,
-                label: Text(d.label),
-              )).toList(),
+              leading: Padding(
+                padding: const EdgeInsets.only(top: 10, bottom: 20),
+                child: Semantics(
+                  label: 'JobEval home',
+                  button: true,
+                  child: InkWell(
+                    onTap: () => context.go('/'),
+                    borderRadius: BorderRadius.circular(8),
+                    child: const Padding(
+                      padding: EdgeInsets.all(8),
+                      child: Icon(Icons.precision_manufacturing_outlined),
+                    ),
+                  ),
+                ),
+              ),
+              destinations: const [
+                NavigationRailDestination(
+                  icon: Icon(Icons.dashboard_outlined),
+                  selectedIcon: Icon(Icons.dashboard),
+                  label: Text('Dashboard'),
+                ),
+                NavigationRailDestination(
+                  icon: Icon(Icons.settings_outlined),
+                  selectedIcon: Icon(Icons.settings),
+                  label: Text('Settings'),
+                ),
+              ],
             ),
             const VerticalDivider(width: 1),
-            Expanded(child: widget.child),
+            Expanded(child: child),
           ],
         ),
       );
     }
-
     return Scaffold(
       body: child,
       bottomNavigationBar: NavigationBar(
-        selectedIndex: _selectedIndex,
-        onDestinationSelected: _onDestinationSelected,
-        backgroundColor: Theme.of(context).colorScheme.surface,
-        indicatorColor: Theme.of(context).colorScheme.primaryContainer,
-        destinations: _destinations,
+        selectedIndex: selected,
+        onDestinationSelected: (index) {
+          context.go(index == 0 ? '/' : '/settings');
+        },
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.dashboard_outlined),
+            selectedIcon: Icon(Icons.dashboard),
+            label: 'Dashboard',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.settings_outlined),
+            selectedIcon: Icon(Icons.settings),
+            label: 'Settings',
+          ),
+        ],
       ),
     );
   }
 }
 
 class ProjectShell extends StatefulWidget {
-  final String projectId;
-  final Widget child;
-
   const ProjectShell({
     super.key,
     required this.projectId,
     required this.child,
   });
 
+  final String projectId;
+  final Widget child;
+
   @override
   State<ProjectShell> createState() => _ProjectShellState();
 }
 
 class _ProjectShellState extends State<ProjectShell> {
-  int _selectedIndex = 0;
+  final _drawerKey = GlobalKey<ScaffoldState>();
 
-  static const List<_ProjectTab> _tabs = [
-    _ProjectTab('viewer', 0, Icons.visibility, 'Viewer'),
-    _ProjectTab('features', 1, Icons.architecture, 'Features'),
-    _ProjectTab('drawing', 2, Icons.description, 'Drawing'),
-    _ProjectTab('manufacturing', 3, Icons.factory, 'CNC'),
-    _ProjectTab('materials', 4, Icons.inventory, 'Materials'),
-    _ProjectTab('cost', 5, Icons.attach_money, 'Cost'),
-    _ProjectTab('reports', 6, Icons.assessment, 'Reports'),
-    _ProjectTab('chat', 7, Icons.chat, 'AI Chat'),
+  static const _destinations = [
+    _ProjectDestination('overview', Icons.dashboard_outlined, 'Overview'),
+    _ProjectDestination('files', Icons.folder_open_outlined, 'Files'),
+    _ProjectDestination('upload', Icons.upload_file_outlined, 'Upload'),
+    _ProjectDestination('geometry', Icons.view_in_ar_outlined, 'Geometry'),
+    _ProjectDestination('features', Icons.architecture_outlined, 'Features'),
+    _ProjectDestination('drawings', Icons.description_outlined, 'Drawings'),
+    _ProjectDestination(
+      'cross-validation',
+      Icons.compare_arrows_outlined,
+      'Cross-check',
+    ),
+    _ProjectDestination('manufacturing', Icons.factory_outlined, 'Plan'),
+    _ProjectDestination('pricing', Icons.price_check_outlined, 'Pricing'),
+    _ProjectDestination('report', Icons.assessment_outlined, 'Report'),
   ];
+
+  int _selectedIndex() {
+    final location = GoRouterState.of(context).uri.path;
+    final segment = location.split('/').where((part) => part.isNotEmpty).last;
+    final index = _destinations.indexWhere((item) => item.route == segment);
+    return index < 0 ? 0 : index;
+  }
+
+  void _select(int index) {
+    context.go('/projects/${widget.projectId}/${_destinations[index].route}');
+  }
 
   @override
   Widget build(BuildContext context) {
-    final isWide = MediaQuery.of(context).size.width >= 900;
-
-    if (isWide) {
-      return Scaffold(
-        appBar: AppBar(
-          title: Text('Project ${widget.projectId}'),
-          leading: IconButton(
-            icon: const Icon(Icons.arrow_back),
-            onPressed: () => context.go('/'),
+    final wide = MediaQuery.sizeOf(context).width >= 980;
+    final selected = _selectedIndex();
+    final title = _destinations[selected].label;
+    final appBar = AppBar(
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title),
+          Text(
+            'Project ${widget.projectId}',
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
           ),
-          actions: [
-            IconButton(
-              icon: const Icon(Icons.refresh),
-              onPressed: () {},
+        ],
+      ),
+      leading: wide
+          ? IconButton(
+              tooltip: 'Back to dashboard',
+              onPressed: () => context.go('/'),
+              icon: const Icon(Icons.arrow_back),
+            )
+          : IconButton(
+              tooltip: 'Open project navigation',
+              onPressed: () => _drawerKey.currentState?.openDrawer(),
+              icon: const Icon(Icons.menu),
             ),
-          ],
+      actions: [
+        IconButton(
+          tooltip: 'Back to dashboard',
+          onPressed: () => context.go('/'),
+          icon: const Icon(Icons.home_outlined),
         ),
+        const SizedBox(width: 6),
+      ],
+    );
+
+    if (wide) {
+      return Scaffold(
+        appBar: appBar,
         body: Row(
           children: [
             NavigationRail(
-              selectedIndex: _selectedIndex,
-              onDestinationSelected: (index) {
-                setState(() => _selectedIndex = index);
-                context.go('/project/${widget.projectId}/${_tabs[index].route}');
-              },
+              selectedIndex: selected,
+              onDestinationSelected: _select,
               labelType: NavigationRailLabelType.all,
               extended: true,
-              backgroundColor: Theme.of(context).colorScheme.surface,
-              selectedIconTheme: IconThemeData(
-                color: Theme.of(context).colorScheme.primary,
-              ),
-              unselectedIconTheme: IconThemeData(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-              destinations: _tabs.map((t) => NavigationRailDestination(
-                icon: Icon(t.icon),
-                selectedIcon: Icon(t.icon, color: Theme.of(context).colorScheme.primary),
-                label: Text(t.label),
-              )).toList(),
+              minExtendedWidth: 210,
+              destinations: _destinations.map((destination) {
+                return NavigationRailDestination(
+                  icon: Icon(destination.icon),
+                  selectedIcon: Icon(destination.icon),
+                  label: Text(destination.label),
+                );
+              }).toList(),
             ),
             const VerticalDivider(width: 1),
             Expanded(child: widget.child),
@@ -304,37 +357,47 @@ class _ProjectShellState extends State<ProjectShell> {
     }
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text('Project ${widget.projectId}'),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.go('/'),
+      key: _drawerKey,
+      appBar: appBar,
+      drawer: Drawer(
+        child: SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.symmetric(vertical: 10),
+            children: [
+              ListTile(
+                leading: const Icon(Icons.precision_manufacturing_outlined),
+                title: const Text(
+                  'JobEval project',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+                subtitle: Text(widget.projectId),
+              ),
+              const Divider(),
+              for (var index = 0; index < _destinations.length; index++)
+                ListTile(
+                  selected: selected == index,
+                  selectedTileColor:
+                      Theme.of(context).colorScheme.primaryContainer,
+                  leading: Icon(_destinations[index].icon),
+                  title: Text(_destinations[index].label),
+                  onTap: () {
+                    Navigator.pop(context);
+                    _select(index);
+                  },
+                ),
+            ],
+          ),
         ),
       ),
       body: widget.child,
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _selectedIndex,
-        onDestinationSelected: (index) {
-          setState(() => _selectedIndex = index);
-          context.go('/project/${widget.projectId}/${_tabs[index].route}');
-        },
-        backgroundColor: Theme.of(context).colorScheme.surface,
-        indicatorColor: Theme.of(context).colorScheme.primaryContainer,
-        destinations: _tabs.map((t) => NavigationDestination(
-          icon: Icon(t.icon),
-          selectedIcon: Icon(t.icon, color: Theme.of(context).colorScheme.primary),
-          label: t.label,
-        )).toList(),
-      ),
     );
   }
 }
 
-class _ProjectTab {
+class _ProjectDestination {
+  const _ProjectDestination(this.route, this.icon, this.label);
+
   final String route;
-  final int index;
   final IconData icon;
   final String label;
-
-  _ProjectTab(this.route, this.index, this.icon, this.label);
 }

@@ -1,93 +1,124 @@
-"""Database configuration and session management."""
+"""SQLAlchemy 2 database setup.
 
-from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+JobEval uses a small SQLite database by default.  The session dependency is
+synchronous on purpose: it keeps the local API usable from scripts, tests, and
+ordinary ``uvicorn`` processes without an async driver or a broker.
+"""
 
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from sqlalchemy.orm import DeclarativeBase
+from __future__ import annotations
+
+from collections.abc import Iterator
+from contextlib import contextmanager
+
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import get_settings
 
-settings = get_settings()
-
 
 class Base(DeclarativeBase):
-    """Base class for all database models."""
-    pass
+    """Base class for all JobEval tables."""
 
 
 class DatabaseManager:
-    """Manages database connections and sessions."""
+    """Owns the SQLAlchemy engine and session factory."""
 
     def __init__(self) -> None:
-        self._engine: AsyncEngine | None = None
-        self._session_factory: async_sessionmaker[AsyncSession] | None = None
+        self._engine: Engine | None = None
+        self._session_factory: sessionmaker[Session] | None = None
 
     def init(self) -> None:
-        """Initialize the database engine and session factory."""
-        self._engine = create_async_engine(
-            settings.DATABASE_URL,
-            pool_size=settings.DATABASE_POOL_SIZE,
-            max_overflow=settings.DATABASE_MAX_OVERFLOW,
-            echo=settings.DATABASE_ECHO,
+        if self._engine is not None and self._session_factory is not None:
+            return
+        settings = get_settings()
+        url = settings.database_url
+        if not url.startswith("sqlite"):
+            raise RuntimeError(
+                "The local JobEval backend currently supports SQLite only. "
+                "Set DATABASE_URL to a sqlite:/// URL."
+            )
+        self._engine = create_engine(
+            url,
+            connect_args={"check_same_thread": False},
             pool_pre_ping=True,
-        )
-        self._session_factory = async_sessionmaker(
-            self._engine,
-            class_=AsyncSession,
-            expire_on_commit=False,
-            autoflush=False,
+            future=True,
         )
 
-    async def close(self) -> None:
-        """Close the database engine."""
-        if self._engine:
-            await self._engine.dispose()
-            self._engine = None
-            self._session_factory = None
+        @event.listens_for(self._engine, "connect")
+        def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+        self._session_factory = sessionmaker(
+            bind=self._engine,
+            class_=Session,
+            autoflush=False,
+            expire_on_commit=False,
+        )
+
+    def close(self) -> None:
+        if self._engine is not None:
+            self._engine.dispose()
+        self._engine = None
+        self._session_factory = None
 
     @property
-    def engine(self) -> AsyncEngine:
-        if not self._engine:
-            raise RuntimeError("Database not initialized. Call init() first.")
+    def engine(self) -> Engine:
+        if self._engine is None:
+            self.init()
+        assert self._engine is not None
         return self._engine
 
     @property
-    def session_factory(self) -> async_sessionmaker[AsyncSession]:
-        if not self._session_factory:
-            raise RuntimeError("Database not initialized. Call init() first.")
+    def session_factory(self) -> sessionmaker[Session]:
+        if self._session_factory is None:
+            self.init()
+        assert self._session_factory is not None
         return self._session_factory
 
-    @asynccontextmanager
-    async def session(self) -> AsyncGenerator[AsyncSession, None]:
-        """Get a database session."""
-        async with self.session_factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-            finally:
-                await session.close()
+    @contextmanager
+    def session(self) -> Iterator[Session]:
+        session = self.session_factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
-    async def create_tables(self) -> None:
-        """Create all tables."""
-        async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+    def create_tables(self) -> None:
+        # Importing models registers all tables on Base.metadata.
+        from app import models  # noqa: F401
 
-    async def drop_tables(self) -> None:
-        """Drop all tables."""
-        async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
+        Base.metadata.create_all(self.engine)
+
+    def drop_tables(self) -> None:
+        from app import models  # noqa: F401
+
+        Base.metadata.drop_all(self.engine)
 
 
 db_manager = DatabaseManager()
 
 
-get_db_session = db_manager.session
+def get_db_session() -> Iterator[Session]:
+    """FastAPI dependency yielding a request-scoped SQLAlchemy session."""
+
+    db_manager.init()
+    session = db_manager.session_factory()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+# A compatibility alias used by a few early scripts.
+get_db = get_db_session

@@ -1,261 +1,427 @@
 import 'package:dio/dio.dart';
-import 'package:jobeval/core/api/api_endpoints.dart';
-import 'package:jobeval/core/models/models.dart';
+import 'package:jobeval/core/api/api_config.dart';
+import 'package:jobeval/core/api/api_exception.dart';
+import 'package:jobeval/core/models/json_data.dart';
 
 class ApiClient {
+  ApiClient({Dio? dio, String? baseUrl})
+      : _dio = dio ??
+            Dio(
+              BaseOptions(
+                baseUrl: baseUrl ?? ApiConfig.baseUrl,
+                connectTimeout: const Duration(seconds: 20),
+                receiveTimeout: const Duration(seconds: 90),
+                sendTimeout: const Duration(seconds: 90),
+                headers: const {
+                  'Accept': 'application/json',
+                },
+              ),
+            );
+
   final Dio _dio;
 
-  ApiClient(this._dio);
+  String get baseUrl => _dio.options.baseUrl;
 
-  // =============================================================================
-  // Health
-  // =============================================================================
-
-  Future<HealthResponse> healthCheck() async {
-    final response = await _dio.get(ApiEndpoints.health);
-    return HealthResponse.fromJson(response.data);
+  Future<JsonMap> getHealth() {
+    return _requestMap(
+      () => _dio.get<dynamic>('/health'),
+      action: 'Check backend health',
+    );
   }
 
-  Future<ReadinessResponse> readinessCheck() async {
-    final response = await _dio.get(ApiEndpoints.healthReady);
-    return ReadinessResponse.fromJson(response.data);
+  Future<List<JsonMap>> listProjects() {
+    return _requestList(
+      () => _dio.get<dynamic>('/projects'),
+      action: 'Load recent projects',
+    );
   }
 
-  // =============================================================================
-  // Projects
-  // =============================================================================
-
-  Future<PaginatedResponse<ProjectSummary>> listProjects({
-    int page = 1,
-    int pageSize = 20,
-    String? status,
-  }) async {
-    final response = await _dio.get(ApiEndpoints.projects, queryParameters: {
-      'page': page,
-      'page_size': pageSize,
-      if (status != null) 'status': status,
-    });
-    return PaginatedResponse.fromJson(response.data, ProjectSummary.fromJson);
+  Future<JsonMap> getProject(String projectId) {
+    return _requestMap(
+      () => _dio.get<dynamic>('/projects/$projectId'),
+      action: 'Load project',
+      projectId: projectId,
+    );
   }
 
-  Future<ProjectDetail> getProject(String projectId) async {
-    final response = await _dio.get(ApiEndpoints.project(projectId));
-    return ProjectDetail.fromJson(response.data);
+  Future<JsonMap> createProject({
+    required String name,
+    String? description,
+  }) {
+    return _requestMap(
+      () => _dio.post<dynamic>(
+        '/projects',
+        data: {
+          'name': name,
+          if (description != null && description.isNotEmpty)
+            'description': description,
+        },
+      ),
+      action: 'Create project',
+    );
   }
 
-  Future<ProjectDetail> createProject(CreateProjectRequest request) async {
-    final response = await _dio.post(ApiEndpoints.projects, data: request.toJson());
-    return ProjectDetail.fromJson(response.data);
+  Future<JsonMap> createDemoProject({required String label}) {
+    return _requestMap(
+      () => _dio.post<dynamic>('/projects/demo', data: {'label': label}),
+      action: 'Create labelled demo project',
+    );
+  }
+
+  Future<JsonMap> updateProject(
+    String projectId, {
+    required JsonMap changes,
+  }) {
+    return _requestMap(
+      () => _dio.patch<dynamic>('/projects/$projectId', data: changes),
+      action: 'Update project',
+      projectId: projectId,
+    );
   }
 
   Future<void> deleteProject(String projectId) async {
-    await _dio.delete(ApiEndpoints.project(projectId));
+    await _requestMap(
+      () => _dio.delete<dynamic>('/projects/$projectId'),
+      action: 'Delete project',
+      projectId: projectId,
+    );
   }
 
-  Future<JobStatus> getJobStatus(String projectId) async {
-    final response = await _dio.get(ApiEndpoints.projectStatus(projectId));
-    return JobStatus.fromJson(response.data);
+  Future<List<JsonMap>> listRecentJobs() async {
+    try {
+      return await _requestList(
+        () => _dio.get<dynamic>('/jobs'),
+        action: 'Load recent jobs',
+      );
+    } on ApiException catch (error) {
+      if (error.statusCode == 404) return const [];
+      rethrow;
+    }
   }
 
-  // =============================================================================
-  // File Upload
-  // =============================================================================
-
-  Future<UploadInitResponse> initUpload(UploadInitRequest request) async {
-    final response = await _dio.post(ApiEndpoints.uploadInit, data: request.toJson());
-    return UploadInitResponse.fromJson(response.data);
+  Future<JsonMap> getJob(String jobId) {
+    return _requestMap(
+      () => _dio.get<dynamic>('/jobs/$jobId'),
+      action: 'Load job status',
+    );
   }
 
-  Future<void> uploadFile({
-    required String uploadUrl,
-    required String filePath,
+  Future<List<JsonMap>> listFiles(String projectId) {
+    return _requestList(
+      () => _dio.get<dynamic>('/projects/$projectId/files'),
+      action: 'Load project files',
+      projectId: projectId,
+    );
+  }
+
+  Future<JsonMap> uploadFile({
+    required String projectId,
     required String fileName,
-    required int fileSize,
-    required String mimeType,
+    required String role,
+    String? path,
+    List<int>? bytes,
     void Function(int sent, int total)? onProgress,
   }) async {
-    // For direct upload to MinIO/S3, use a separate Dio instance without base URL
-    final uploadDio = Dio();
-    await uploadDio.put(
-      uploadUrl,
-      data: await MultipartFile.fromFile(
-        filePath,
+    if (path == null && bytes == null) {
+      throw const ApiException(
+        message: 'This platform did not provide readable file data for upload.',
+        action: 'Upload file',
+      );
+    }
+    final MultipartFile multipart;
+    if (path != null) {
+      multipart = await MultipartFile.fromFile(path, filename: fileName);
+    } else {
+      multipart = MultipartFile.fromBytes(
+        bytes!,
         filename: fileName,
-        contentType: DioMediaType.parse(mimeType),
-      ),
-      options: Options(
-        headers: {
-          'Content-Type': mimeType,
-          'Content-Length': fileSize.toString(),
+      );
+    }
+    final form = FormData.fromMap({
+      'file': multipart,
+      'role': role,
+    });
+    return _requestMap(
+      () => _dio.post<dynamic>(
+        '/projects/$projectId/files',
+        data: form,
+        options: Options(contentType: 'multipart/form-data'),
+        onSendProgress: (sent, total) {
+          if (total > 0) onProgress?.call(sent, total);
         },
       ),
-      onSendProgress: onProgress,
+      action: 'Upload file',
+      projectId: projectId,
+      fileName: fileName,
     );
   }
 
-  Future<UploadCompleteResponse> completeUpload(String uploadId, List<String> partEtags) async {
-    final response = await _dio.post(ApiEndpoints.uploadComplete, data: {
-      'upload_id': uploadId,
-      'part_etags': partEtags,
-    });
-    return UploadCompleteResponse.fromJson(response.data);
+  Future<void> deleteFile(String fileId, {String? fileName}) async {
+    await _requestMap(
+      () => _dio.delete<dynamic>('/files/$fileId'),
+      action: 'Delete file',
+      fileName: fileName,
+    );
   }
 
-  // =============================================================================
-  // CAD Processing
-  // =============================================================================
-
-  Future<CadProcessResponse> processCad(CadProcessRequest request) async {
-    final response = await _dio.post(ApiEndpoints.cadProcess, data: request.toJson());
-    return CadProcessResponse.fromJson(response.data);
+  Future<JsonMap> startAnalysis(String projectId) {
+    return _requestMap(
+      () => _dio.post<dynamic>('/projects/$projectId/analysis'),
+      action: 'Start geometry analysis',
+      projectId: projectId,
+    );
   }
 
-  Future<CadSpecs> getCadSpecs(String projectId) async {
-    final response = await _dio.get(ApiEndpoints.projectResults(projectId));
-    return CadSpecs.fromJson(response.data);
+  Future<JsonMap> getAnalysis(String projectId) {
+    return _requestMap(
+      () => _dio.get<dynamic>('/projects/$projectId/analysis'),
+      action: 'Load geometry analysis',
+      projectId: projectId,
+    );
   }
 
-  Future<List<CadView>> getCadViews(String projectId) async {
-    final response = await _dio.get(ApiEndpoints.cadViews, queryParameters: {
-      'project_id': projectId,
-    });
-    return (response.data as List).map((e) => CadView.fromJson(e)).toList();
+  Future<List<JsonMap>> getFeatures(String projectId) {
+    return _requestList(
+      () => _dio.get<dynamic>('/projects/$projectId/features'),
+      action: 'Load reviewed features',
+      projectId: projectId,
+    );
   }
 
-  Future<CadExportResponse> exportCad(CadExportRequest request) async {
-    final response = await _dio.post(ApiEndpoints.cadExport, data: request.toJson());
-    return CadExportResponse.fromJson(response.data);
+  Future<JsonMap> updateFeature(
+    String projectId,
+    String featureId,
+    JsonMap changes,
+  ) {
+    return _requestMap(
+      () => _dio.patch<dynamic>(
+        '/projects/$projectId/features/$featureId',
+        data: changes,
+      ),
+      action: 'Update feature review',
+      projectId: projectId,
+    );
   }
 
-  // =============================================================================
-  // Feature Recognition
-  // =============================================================================
-
-  Future<FeatureRecognitionResult> getFeatures(String projectId) async {
-    final response = await _dio.get('${ApiEndpoints.cadFeatures}/$projectId');
-    return FeatureRecognitionResult.fromJson(response.data);
+  Future<JsonMap> parseDrawings(String projectId) {
+    return _requestMap(
+      () => _dio.post<dynamic>('/projects/$projectId/drawings/parse'),
+      action: 'Parse drawing',
+      projectId: projectId,
+    );
   }
 
-  // =============================================================================
-  // Drawing Analysis
-  // =============================================================================
-
-  Future<DrawingProcessResponse> processDrawing(DrawingProcessRequest request) async {
-    final response = await _dio.post(ApiEndpoints.drawingsProcess, data: request.toJson());
-    return DrawingProcessResponse.fromJson(response.data);
+  Future<List<JsonMap>> getDrawings(String projectId) {
+    return _requestList(
+      () => _dio.get<dynamic>('/projects/$projectId/drawings'),
+      action: 'Load drawing annotations',
+      projectId: projectId,
+    );
   }
 
-  Future<DrawingAnnotations> getDrawingAnnotations(String projectId) async {
-    final response = await _dio.get(ApiEndpoints.drawingsExtract, queryParameters: {
-      'project_id': projectId,
-    });
-    return DrawingAnnotations.fromJson(response.data);
+  Future<JsonMap> runCrossValidation(
+    String projectId, {
+    JsonMap? request,
+  }) {
+    return _requestMap(
+      () => _dio.post<dynamic>(
+        '/projects/$projectId/cross-validation',
+        data: request,
+      ),
+      action: 'Run cross-validation',
+      projectId: projectId,
+    );
   }
 
-  Future<CrossValidationReport> compareModelDrawing(String projectId) async {
-    final response = await _dio.post(ApiEndpoints.drawingsCompare, data: {
-      'project_id': projectId,
-    });
-    return CrossValidationReport.fromJson(response.data);
+  Future<List<JsonMap>> getCrossValidation(String projectId) {
+    return _requestList(
+      () => _dio.get<dynamic>('/projects/$projectId/cross-validation'),
+      action: 'Load cross-validation results',
+      projectId: projectId,
+    );
   }
 
-  // =============================================================================
-  // Manufacturing Analysis
-  // =============================================================================
-
-  Future<ManufacturingAnalysis> analyzeManufacturing(ManufacturingRequest request) async {
-    final response = await _dio.post(ApiEndpoints.manufacturingAnalyze, data: request.toJson());
-    return ManufacturingAnalysis.fromJson(response.data);
+  Future<JsonMap> getManufacturingPlan(String projectId) {
+    return _requestMap(
+      () => _dio.get<dynamic>('/projects/$projectId/manufacturing-plan'),
+      action: 'Load manufacturing plan',
+      projectId: projectId,
+    );
   }
 
-  Future<List<Setup>> getSetups(String projectId) async {
-    final response = await _dio.get(ApiEndpoints.manufacturingSetups, queryParameters: {
-      'project_id': projectId,
-    });
-    return (response.data as List).map((e) => Setup.fromJson(e)).toList();
+  Future<JsonMap> putManufacturingPlan(
+    String projectId,
+    JsonMap plan,
+  ) {
+    return _requestMap(
+      () => _dio.put<dynamic>(
+        '/projects/$projectId/manufacturing-plan',
+        data: plan,
+      ),
+      action: 'Save manufacturing plan',
+      projectId: projectId,
+    );
   }
 
-  Future<List<Operation>> getOperations(String projectId) async {
-    final response = await _dio.get(ApiEndpoints.manufacturingOperations, queryParameters: {
-      'project_id': projectId,
-    });
-    return (response.data as List).map((e) => Operation.fromJson(e)).toList();
+  Future<JsonMap> getPricing(String projectId) {
+    return _requestMap(
+      () => _dio.get<dynamic>('/projects/$projectId/pricing'),
+      action: 'Load project pricing',
+      projectId: projectId,
+    );
   }
 
-  // =============================================================================
-  // Materials
-  // =============================================================================
+  Future<JsonMap> putPricing(String projectId, JsonMap pricing) {
+    return _requestMap(
+      () => _dio.put<dynamic>(
+        '/projects/$projectId/pricing',
+        data: pricing,
+      ),
+      action: 'Save project pricing',
+      projectId: projectId,
+    );
+  }
 
-  Future<List<MaterialInfo>> listMaterials({
-    String? category,
-    String? search,
+  Future<JsonMap> postEstimate(String projectId, JsonMap pricing) {
+    return _requestMap(
+      () => _dio.post<dynamic>(
+        '/projects/$projectId/estimate',
+        data: pricing,
+      ),
+      action: 'Calculate estimate',
+      projectId: projectId,
+    );
+  }
+
+  Future<JsonMap> getEstimate(String projectId) {
+    return _requestMap(
+      () => _dio.get<dynamic>('/projects/$projectId/estimate'),
+      action: 'Load saved estimate',
+      projectId: projectId,
+    );
+  }
+
+  Future<JsonMap> getReport(String projectId, {required String format}) {
+    return _requestMap(
+      () => _dio.get<dynamic>(
+        '/projects/$projectId/reports',
+        queryParameters: {'format': format},
+      ),
+      action: 'Load $format report',
+      projectId: projectId,
+    );
+  }
+
+  Future<JsonMap> getGlobalPricing() {
+    return _requestMap(
+      () => _dio.get<dynamic>('/settings/pricing'),
+      action: 'Load global pricing defaults',
+    );
+  }
+
+  Future<JsonMap> putGlobalPricing(JsonMap pricing) {
+    return _requestMap(
+      () => _dio.put<dynamic>('/settings/pricing', data: pricing),
+      action: 'Save global pricing defaults',
+    );
+  }
+
+  Future<JsonMap> _requestMap(
+    Future<Response<dynamic>> Function() request, {
+    required String action,
+    String? projectId,
+    String? fileName,
   }) async {
-    final response = await _dio.get(ApiEndpoints.materials, queryParameters: {
-      if (category != null) 'category': category,
-      if (search != null) 'search': search,
-    });
-    return (response.data as List).map((e) => MaterialInfo.fromJson(e)).toList();
+    try {
+      final response = await request();
+      return _unwrapMap(response.data);
+    } on DioException catch (error) {
+      throw ApiException.fromDio(
+        error,
+        action: action,
+        projectId: projectId,
+        fileName: fileName,
+      );
+    } on ApiException {
+      rethrow;
+    } catch (_) {
+      throw ApiException(
+        message: 'The request could not be completed.',
+        action: action,
+        projectId: projectId,
+        fileName: fileName,
+      );
+    }
   }
 
-  Future<MaterialInfo> getMaterial(String materialId) async {
-    final response = await _dio.get(ApiEndpoints.material(materialId));
-    return MaterialInfo.fromJson(response.data);
+  Future<List<JsonMap>> _requestList(
+    Future<Response<dynamic>> Function() request, {
+    required String action,
+    String? projectId,
+    String? fileName,
+  }) async {
+    try {
+      final response = await request();
+      return _unwrapMaps(response.data);
+    } on DioException catch (error) {
+      throw ApiException.fromDio(
+        error,
+        action: action,
+        projectId: projectId,
+        fileName: fileName,
+      );
+    } on ApiException {
+      rethrow;
+    } catch (_) {
+      throw ApiException(
+        message: 'The request could not be completed.',
+        action: action,
+        projectId: projectId,
+        fileName: fileName,
+      );
+    }
   }
 
-  Future<MaterialPricing> getMaterialPricing(MaterialPricingRequest request) async {
-    final response = await _dio.post(ApiEndpoints.materialsPricing, data: request.toJson());
-    return MaterialPricing.fromJson(response.data);
+  JsonMap _unwrapMap(dynamic data) {
+    if (data is Map) {
+      final map = JsonData.map(data);
+      final wrapped = map['data'];
+      if (wrapped is Map && !map.containsKey('id')) {
+        return JsonData.map(wrapped);
+      }
+      return map;
+    }
+    return <String, dynamic>{};
   }
 
-  // =============================================================================
-  // Cost Estimation
-  // =============================================================================
-
-  Future<CostEstimate> estimateCost(CostEstimateRequest request) async {
-    final response = await _dio.post(ApiEndpoints.costEstimate, data: request.toJson());
-    return CostEstimate.fromJson(response.data);
-  }
-
-  Future<CostBreakdown> getCostBreakdown(String projectId) async {
-    final response = await _dio.get(ApiEndpoints.costBreakdown, queryParameters: {
-      'project_id': projectId,
-    });
-    return CostBreakdown.fromJson(response.data);
-  }
-
-  // =============================================================================
-  // Reports
-  // =============================================================================
-
-  Future<ReportGenerationResponse> generateReport(ReportGenerationRequest request) async {
-    final response = await _dio.post(ApiEndpoints.reportsGenerate, data: request.toJson());
-    return ReportGenerationResponse.fromJson(response.data);
-  }
-
-  Future<Report> getReport(String reportId) async {
-    final response = await _dio.get(ApiEndpoints.report(reportId));
-    return Report.fromJson(response.data);
-  }
-
-  Future<Response> downloadReport(String reportId, {String format = 'pdf'}) async {
-    return _dio.get(
-      ApiEndpoints.reportDownload(reportId),
-      queryParameters: {'format': format},
-      options: Options(responseType: ResponseType.bytes),
-    );
-  }
-
-  // =============================================================================
-  // LLM Integration
-  // =============================================================================
-
-  Future<LlmAnalysisResponse> analyzeWithLlm(LlmAnalysisRequest request) async {
-    final response = await _dio.post(ApiEndpoints.llmAnalyze, data: request.toJson());
-    return LlmAnalysisResponse.fromJson(response.data);
-  }
-
-  Future<LlmReportResponse> generateLlmReport(LlmReportRequest request) async {
-    final response = await _dio.post(ApiEndpoints.llmReport, data: request.toJson());
-    return LlmReportResponse.fromJson(response.data);
+  List<JsonMap> _unwrapMaps(dynamic data) {
+    if (data is List) return JsonData.maps(data);
+    if (data is Map) {
+      final map = JsonData.map(data);
+      for (final key in const [
+        'items',
+        'data',
+        'results',
+        'files',
+        'features',
+        'operations',
+        'setups',
+        'jobs',
+        'reports',
+        'checks',
+        'pages',
+        'annotations',
+      ]) {
+        final value = map[key];
+        if (value is List) return JsonData.maps(value);
+        if (value is Map) {
+          for (final nestedKey in const ['items', 'data', 'results']) {
+            final nested = value[nestedKey];
+            if (nested is List) return JsonData.maps(nested);
+          }
+        }
+      }
+    }
+    return const [];
   }
 }

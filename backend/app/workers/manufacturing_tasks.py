@@ -1,7 +1,6 @@
 """Celery tasks for manufacturing analysis."""
 
 import logging
-from uuid import UUID
 
 from app.core.celery_app import celery_app
 from app.services.manufacturing_service import ManufacturingService

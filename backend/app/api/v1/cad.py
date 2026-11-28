@@ -4,12 +4,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db_session, db_manager
-from app.services.cad_service import CADService
-from app.schemas.cad_specs import CADSpecs, ProjectSummary, ProjectDetail, CreateProjectRequest
+from app.core.database import get_db_session
 
 router = APIRouter()
 
@@ -45,6 +43,7 @@ async def process_cad_file(
 
     # Queue CAD processing task
     from app.workers.cad_tasks import process_cad_file
+
     background_tasks.add_task(process_cad_file, str(file_path), str(project_id))
 
     return {

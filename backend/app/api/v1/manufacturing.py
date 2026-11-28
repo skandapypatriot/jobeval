@@ -1,15 +1,11 @@
 """Manufacturing analysis API endpoints."""
 
 from typing import Any
-from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
-from app.services.cad_service import CADService
-from app.services.manufacturing_service import ManufacturingService, estimate_cost
-from app.schemas.cad_specs import Material, CostEstimate, ManufacturingAnalysis
 
 router = APIRouter()
 
