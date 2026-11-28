@@ -30,7 +30,8 @@ dependencies = [
 
     # Task queue
     "celery>=5.3.0",
-    "flower>=2.0.0",
+    # "flower>=2.0.0",  # Celery monitoring — optional deployment dependency;
+                        # install separately with: pip install flower (Python <3.12)
 
     # CAD/Geometry
     # "pythonocc-core>=7.7.0",  # Install separately via conda or build from source
