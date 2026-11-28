@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
 import 'package:jobeval/core/models/json_data.dart';
 import 'package:jobeval/core/models/pricing_model.dart';
 import 'package:jobeval/core/providers.dart';
@@ -74,6 +75,14 @@ class _PricingScreenState extends ConsumerState<PricingScreen> {
                 },
                 icon: const Icon(Icons.refresh),
                 label: const Text('Refresh'),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.icon(
+                onPressed: currentEstimate == null || estimate.isLoading
+                    ? null
+                    : _autoCalculateEstimate,
+                icon: const Icon(Icons.calculate),
+                label: const Text('Auto-calculate estimate'),
               ),
             ],
           ),
@@ -190,6 +199,21 @@ class _PricingScreenState extends ConsumerState<PricingScreen> {
           'The backend accepted the request but returned no saved data.');
     }
   }
+
+  Future<void> _autoCalculateEstimate() async {
+    final pricingAsync = ref.read(projectPricingProvider(widget.projectId));
+    final pricingData = pricingAsync.valueOrNull;
+    if (pricingData == null) return;
+
+    final estimate = await ref.read(apiClientProvider).postEstimate(
+          widget.projectId,
+          pricingData,
+        );
+    ref.invalidate(estimateProvider(widget.projectId));
+    if (mounted) {
+      setState(() => _estimateOverride = estimate);
+    }
+  }
 }
 
 class EstimateBreakdown extends StatelessWidget {
@@ -199,6 +223,8 @@ class EstimateBreakdown extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final currency = JsonData.text(estimate['currency'], fallback: 'INR');
+    final formatter = NumberFormat.simpleCurrency(name: currency);
     final lines = JsonData.firstMaps(estimate, const [
       'line_items',
       'items',
@@ -293,6 +319,61 @@ class EstimateBreakdown extends StatelessWidget {
               ),
             ],
           ),
+        const SizedBox(height: 20),
+        SectionCard(
+          title: 'Grand total',
+          subtitle:
+              'Final estimated cost including overhead, margin, contingency, and tax.',
+          leading: const Icon(Icons.receipt_long_outlined),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Total',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    formatter.format(
+                      JsonData.number(
+                        estimate['total'] ?? estimate['total_cost'],
+                        fallback: 0,
+                      ),
+                    ),
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                ],
+              ),
+              if (estimate['base_total'] != null ||
+                  estimate['subtotal_before_tax'] != null ||
+                  estimate['tax'] != null) ...[
+                const SizedBox(height: 8),
+                _TotalBreakdownRow(
+                  label: 'Base total',
+                  value: estimate['base_total'],
+                  formatter: formatter,
+                ),
+                _TotalBreakdownRow(
+                  label: 'Subtotal before tax',
+                  value: estimate['subtotal_before_tax'],
+                  formatter: formatter,
+                ),
+                _TotalBreakdownRow(
+                  label: 'Tax',
+                  value: estimate['tax'],
+                  formatter: formatter,
+                ),
+              ],
+            ],
+          ),
+        ),
         if (warnings.isNotEmpty) ...[
           const SizedBox(height: 16),
           SectionCard(
@@ -459,31 +540,31 @@ class _LineItemRow extends StatelessWidget {
     final subtotal = JsonData.number(line['subtotal'], fallback: 0);
     final isOverride = line['is_override'] == true;
     final formula = JsonData.text(line['formula'], fallback: '');
+    final source = JsonData.text(line['source'] ?? line['calculation_method'], fallback: '');
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 8,
+        runSpacing: 6,
         children: [
-          Expanded(
-            child: Text(
-              label,
-              style: Theme.of(context).textTheme.bodyMedium,
-              overflow: TextOverflow.ellipsis,
-            ),
+          Text(
+            label,
+            style: Theme.of(context).textTheme.bodyMedium,
+            overflow: TextOverflow.ellipsis,
+            softWrap: false,
           ),
-          const SizedBox(width: 8),
           Text(
             quantity == quantity.toInt()
                 ? quantity.toInt().toString()
                 : quantity.toString(),
             style: Theme.of(context).textTheme.bodyMedium,
           ),
-          const SizedBox(width: 8),
           Text(
             rate == 0 ? '–' : rate.toStringAsFixed(2),
             style: Theme.of(context).textTheme.bodyMedium,
           ),
-          const SizedBox(width: 8),
           Text(
             subtotal.toStringAsFixed(2),
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
@@ -491,10 +572,8 @@ class _LineItemRow extends StatelessWidget {
             ),
           ),
           if (isOverride) ...[
-            const SizedBox(width: 8),
             const Icon(Icons.edit, size: 14, color: Colors.orange),
           ],
-          const SizedBox(width: 8),
           if (formula.isNotEmpty)
             Text(
               formula,
@@ -502,6 +581,60 @@ class _LineItemRow extends StatelessWidget {
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
             ),
+          if (source.isNotEmpty) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                source[0].toUpperCase() + source.substring(1),
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      fontSize: 10,
+                    ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _TotalBreakdownRow extends StatelessWidget {
+  final String label;
+  final dynamic value;
+  final NumberFormat formatter;
+
+  const _TotalBreakdownRow({
+    required this.label,
+    required this.value,
+    required this.formatter,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final number = value is num ? value.toDouble() : double.tryParse(value.toString());
+    if (number == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            formatter.format(number),
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              fontWeight: FontWeight.w600,
+            ),
+          ),
         ],
       ),
     );
