@@ -108,3 +108,21 @@ final estimateProvider =
 final globalPricingProvider = FutureProvider.autoDispose<JsonMap>((ref) async {
   return ref.watch(apiClientProvider).getGlobalPricing();
 });
+
+// ---------------------------------------------------------------------------
+// Chat providers
+// ---------------------------------------------------------------------------
+
+final chatHistoryProvider =
+    FutureProvider.autoDispose.family<List<JsonMap>, String>((ref, projectId) async {
+  return ref.watch(apiClientProvider).getChatHistory(projectId);
+});
+
+// ---------------------------------------------------------------------------
+// File view providers
+// ---------------------------------------------------------------------------
+
+final fileViewProvider =
+    FutureProvider.autoDispose.family<JsonMap, String>((ref, fileId) async {
+  return ref.watch(apiClientProvider).getFileViewUrl(fileId);
+});

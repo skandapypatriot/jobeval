@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:jobeval/features/dashboard/dashboard_screen.dart';
 import 'package:jobeval/features/projects/cross_validation_screen.dart';
+import 'package:jobeval/features/projects/chat_screen.dart';
 import 'package:jobeval/features/projects/drawings_screen.dart';
 import 'package:jobeval/features/projects/features_screen.dart';
 import 'package:jobeval/features/projects/files_screen.dart';
@@ -119,6 +120,13 @@ final appRouter = GoRouter(
               path: 'report',
               name: 'project-report',
               builder: (context, state) => ReportScreen(
+                projectId: state.pathParameters['projectId']!,
+              ),
+            ),
+            GoRoute(
+              path: 'chat',
+              name: 'project-chat',
+              builder: (context, state) => ChatScreen(
                 projectId: state.pathParameters['projectId']!,
               ),
             ),

@@ -326,6 +326,48 @@ class ApiClient {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // Chat
+  // ---------------------------------------------------------------------------
+
+  Future<JsonMap> sendChatMessage({
+    required String projectId,
+    required String message,
+    String? provider,
+  }) {
+    return _requestMap(
+      () => _dio.post<dynamic>(
+        '/projects/$projectId/chat',
+        data: {
+          'message': message,
+          if (provider != null) 'provider': provider,
+        },
+      ),
+      action: 'Send chat message',
+      projectId: projectId,
+    );
+  }
+
+  Future<List<JsonMap>> getChatHistory(String projectId) {
+    return _requestList(
+      () => _dio.get<dynamic>('/projects/$projectId/chat'),
+      action: 'Load chat history',
+      projectId: projectId,
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // File viewing
+  // ---------------------------------------------------------------------------
+
+  Future<JsonMap> getFileViewUrl(String fileId) {
+    return _requestMap(
+      () => _dio.get<dynamic>('/files/$fileId/view'),
+      action: 'View file',
+      fileName: fileId,
+    );
+  }
+
   Future<JsonMap> _requestMap(
     Future<Response<dynamic>> Function() request, {
     required String action,

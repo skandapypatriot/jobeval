@@ -122,6 +122,12 @@ class ProjectOverviewScreen extends ConsumerWidget {
                           onTap: () =>
                               context.go('/projects/$projectId/pricing'),
                         ),
+                        _WorkflowAction(
+                          icon: Icons.chat_bubble_outlined,
+                          title: 'Chat',
+                          description: 'Ask questions about your project.',
+                          onTap: () => context.go('/projects/$projectId/chat'),
+                        ),
                       ],
                     ),
                   );
