@@ -382,6 +382,22 @@ class ApiClient {
     );
   }
 
+  Future<JsonMap> ocrExtractImage({
+    required String filePath,
+    String? fileName,
+  }) {
+    return _requestMap(
+      () => _dio.post<dynamic>(
+        '/ocr/extract_file',
+        data: FormData.fromMap({
+          'file': await MultipartFile.fromFile(filePath,
+              filename: fileName ?? imagePath.split('/').last),
+        }),
+      ),
+      action: 'OCR extract text from image',
+    );
+  }
+
   Future<JsonMap> saveApiKey({
     required String provider,
     required String apiKey,

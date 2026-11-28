@@ -915,8 +915,22 @@ def create_estimate(
     
     # Auto-populate finished dimensions from CAD geometry if not provided
     geometry = analysis_row.data.get("geometry") or analysis_row.data.get("geometry_summary") or {}
-    bbox = geometry.get("bbox") or {}
-    low, high = bbox.get("min", {}), bbox.get("max", {})
+    
+    # Try multiple locations for bbox data
+    bbox = None
+    for key in ["bbox", "bounding_box", "bounds"]:
+        if key in geometry:
+            bbox = geometry[key]
+            break
+    
+    # Also check nested structure
+    if bbox is None and "geometry_summary" in analysis_row.data:
+        geom_summary = analysis_row.data.get("geometry_summary", {})
+        bbox = geom_summary.get("bbox") or {}
+    
+    low = bbox.get("min", {}) if bbox else {}
+    high = bbox.get("max", {}) if bbox else {}
+    
     finished_size = {
         "x": float(high.get("x", 0) - low.get("x", 0)),
         "y": float(high.get("y", 0) - low.get("y", 0)),
@@ -1182,6 +1196,70 @@ async def save_llm_api_key(
         "provider": provider,
         "message": f"{provider} API key saved successfully",
     }
+
+
+@router.post("/ocr/extract", tags=["OCR"])
+async def ocr_extract_text(
+    file: UploadFile = File(...),
+    project_id: str | None = Form(None),
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Extract text from an image using OCR (Tesseract on backend).
+    
+    Works on web by uploading image file to backend for processing.
+    """
+    import tempfile
+    import shutil
+    from pathlib import Path as PathLib
+    
+    settings = get_settings()
+    
+    # Initialize OCR service with auto-install
+    ocr_service = DrawingService(auto_install_ocr=True)
+    
+    if not ocr_service.ocr_available:
+        raise HTTPException(
+            status_code=503,
+            detail="OCR is not available. Tesseract is not installed.",
+        )
+    
+    # Save uploaded image to temp file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file.filename.split('.')[-1]}") as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        tmp_path = PathLib(tmp.name)
+    
+    try:
+        # Extract text using OCR
+        text = ocr_service._run_ocr(tmp_path)
+        
+        if not text:
+            return {
+                "text": [],
+                "message": "No text found in image",
+                "ocr_available": True,
+            }
+        
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        
+        # Also try to extract dimensions from OCR text
+        dimensions = []
+        for line in lines:
+            dims = ocr_service._parse_dimensions(line, 1, [0, 0, 100, 100], "ocr_text")
+            dimensions.extend(dims)
+        
+        return {
+            "text": lines,
+            "dimensions": dimensions,
+            "ocr_available": True,
+            "ocr_used": True,
+            "message": f"OCR extracted {len(lines)} lines of text",
+        }
+    finally:
+        # Clean up temp file
+        try:
+            tmp_path.unlink()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

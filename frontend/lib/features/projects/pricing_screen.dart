@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import 'package:jobeval/core/api/api_client.dart';
 import 'package:jobeval/core/models/json_data.dart';
 import 'package:jobeval/core/models/pricing_model.dart';
 import 'package:jobeval/core/providers.dart';
@@ -18,12 +19,69 @@ class PricingScreen extends ConsumerStatefulWidget {
 
 class _PricingScreenState extends ConsumerState<PricingScreen> {
   JsonMap? _estimateOverride;
+  String? _currency;
+  int _quantity = 1;
+  double _perPieceTotal = 0.0;
 
   @override
   Widget build(BuildContext context) {
     final pricing = ref.watch(projectPricingProvider(widget.projectId));
     final estimate = ref.watch(estimateProvider(widget.projectId));
     final currentEstimate = _estimateOverride ?? estimate.valueOrNull;
+    final currency = currentEstimate != null
+        ? JsonData.text(currentEstimate['currency'], fallback: 'INR')
+        : 'INR';
+    final formatter = NumberFormat.simpleCurrency(name: currency);
+
+    // Extract per-piece info from estimate
+    final perPiece = currentEstimate != null
+        ? JsonData.firstMap(currentEstimate, const ['per_piece']) ?? {}
+        : <String, dynamic>{};
+    final perPieceCost = perPiece['total_per_piece'] as num?;
+    final machiningMinutes = perPiece['machining_minutes'] as num?;
+    final machiningHours = perPiece['machining_hours'] as num?;
+    final materialCost = perPiece['material_cost'] as num?;
+
+    // Extract finished dimensions from estimate
+    final finishedBBox = currentEstimate != null
+        ? JsonData.firstMap(currentEstimate, const [
+            'finished_bbox',
+            'finished_dimensions',
+            'finished_dimensions_mm',
+          ]) ??
+          {}
+        : <String, dynamic>{};
+    final finishedSize = finishedBBox['size'] as Map? ?? {};
+    final finishedX = (finishedSize['x'] as num?) ?? 0.0;
+    final finishedY = (finishedSize['y'] as num?) ?? 0.0;
+    final finishedZ = (finishedSize['z'] as num?) ?? 0.0;
+
+    // Extract stock dimensions
+    final stockDims = currentEstimate != null
+        ? JsonData.firstMap(currentEstimate, const [
+            'stock',
+            'stock_dimensions',
+            'stock_envelope',
+          ]) ??
+          {}
+        : <String, dynamic>{};
+    final stockSize = stockDims['size'] as Map? ?? {};
+    final stockX = (stockSize['x'] as num?) ?? 0.0;
+    final stockY = (stockSize['y'] as num?) ?? 0.0;
+    final stockZ = (stockSize['z'] as num?) ?? 0.0;
+
+    // Extract allowances
+    final allowances = currentEstimate != null
+        ? JsonData.firstMap(currentEstimate, const [
+            'allowances',
+            'allowance_mm',
+          ]) ??
+          {}
+        : <String, dynamic>{};
+    final allowanceX = (allowances['x'] as num?) ?? 2.0;
+    final allowanceY = (allowances['y'] as num?) ?? 2.0;
+    final allowanceZ = (allowances['z'] as num?) ?? 2.0;
+
     return ResponsiveBody(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -59,6 +117,42 @@ class _PricingScreenState extends ConsumerState<PricingScreen> {
               initialPricing: data,
               saveLabel: 'Save pricing & recalculate estimate',
               onSave: _saveAndEstimate,
+            ),
+          ),
+          const SizedBox(height: 20),
+          SectionCard(
+            title: 'Stock & Finished Dimensions',
+            subtitle:
+                'Finished dimensions are automatically read from CAD analysis. '
+                'Stock envelope = finished + allowance per side.',
+            leading: const Icon(Icons.inventory_2_outlined),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _DimensionRow(
+                  title: 'Finished dimensions (mm)',
+                  x: finishedX,
+                  y: finishedY,
+                  z: finishedZ,
+                  label: 'From CAD model',
+                ),
+                const SizedBox(height: 12),
+                _DimensionRow(
+                  title: 'Stock envelope (finished + allowance)',
+                  x: stockX,
+                  y: stockY,
+                  z: stockZ,
+                  label: 'Required stock',
+                ),
+                const SizedBox(height: 12),
+                _DimensionRow(
+                  title: 'Machining allowance per side (mm)',
+                  x: allowanceX,
+                  y: allowanceY,
+                  z: allowanceZ,
+                  label: 'Per side',
+                ),
+              ],
             ),
           ),
           const SizedBox(height: 20),
@@ -146,6 +240,13 @@ class EstimateBreakdown extends StatelessWidget {
       estimate,
       const ['total', 'grand_total', 'total_cost', 'final_total'],
     );
+    final perPiece = JsonData.firstMap(estimate, const ['per_piece']) ?? {};
+    final perPieceCost =
+        JsonData.number(perPiece['total_per_piece']);
+    final machiningMinutes = perPiece['machining_minutes'] as num?;
+    final machiningHours = perPiece['machining_hours'] as num?;
+    final materialCost = perPiece['material_cost'] as num?;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -155,197 +256,293 @@ class EstimateBreakdown extends StatelessWidget {
             style: Theme.of(context).textTheme.bodyMedium,
           )
         else
-          Scrollbar(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: DataTable(
-                headingRowHeight: 42,
-                dataRowMinHeight: 54,
-                dataRowMaxHeight: 88,
-                columns: const [
-                  DataColumn(label: Text('Line')),
-                  DataColumn(label: Text('Quantity')),
-                  DataColumn(label: Text('Unit')),
-                  DataColumn(label: Text('Rate')),
-                  DataColumn(label: Text('Basis / formula')),
-                  DataColumn(label: Text('Subtotal')),
-                  DataColumn(label: Text('Method')),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: SectionCard(
+                      title: 'Per-part cost breakdown',
+                      subtitle:
+                          'Cost per single part based on current pricing assumptions.',
+                      leading: const Icon(Icons.calculate_outlined),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (materialCost != null)
+                            _PerPieceLine(
+                              label: 'Material cost',
+                              value: formatter.format(materialCost),
+                              icon: Icons.inventory_2_outlined,
+                            ),
+                          if (machiningCost != null)
+                            _PerPieceLine(
+                              label: 'Machining cost',
+                              value: formatter.format(machiningCost),
+                              icon: Icons.factory_outlined,
+                            ),
+                          if (machiningHours != null)
+                            _PerPieceLine(
+                              label: 'Machining time',
+                              value: '${machiningHours.toStringAsFixed(2)} hours',
+                              icon: Icons.access_time,
+                            ),
+                          if (machiningMinutes != null)
+                            _PerPieceLine(
+                              label: 'Machining minutes',
+                              value: '${machiningMinutes.toStringAsFixed(1)} min',
+                              icon: Icons.access_time,
+                            ),
+                          const Divider(height: 24),
+                          _PerPieceLine(
+                            label: 'Per-part total',
+                            value: perPieceCost != null
+                                ? formatter.format(perPieceCost)
+                                : '–',
+                            icon: Icons.receipt_long_outlined,
+                            isTotal: true,
+                          ),
+                          const SizedBox(height: 16),
+                          _QuantitySelector(
+                            quantity: 1,
+                            perPieceCost: perPieceCost,
+                          ),
+                        ],
+                      ),
+                    ),
+                  Expanded(
+                    child: SectionCard(
+                      title: 'Line items',
+                      subtitle: 'Each line item in the cost breakdown.',
+                      leading: const Icon(Icons.list_outlined),
+                      child: Column(
+                        children: lines.map((line) {
+                          return _LineItemRow(line: line);
+                        }).toList(),
+                      ),
+                    ),
+                  ),
                 ],
-                rows: lines.map((line) {
-                  final quantity =
-                      _firstNumber(line, const ['quantity', 'qty']);
-                  final rate = _firstNumber(
-                    line,
-                    const ['rate', 'unit_rate', 'unit_cost', 'price'],
-                  );
-                  final subtotal = _firstNumber(
-                    line,
-                    const ['subtotal', 'amount', 'total', 'line_total'],
-                  );
-                  final basis = JsonData.text(line['basis']);
-                  final formula = JsonData.text(line['formula']);
-                  final override = JsonData.boolean(
-                        line['override'] ?? line['is_override'],
-                      ) ||
-                      line['override_amount'] != null ||
-                      line['rate_override'] != null ||
-                      JsonData.text(line['calculation_method']).toLowerCase() ==
-                          'override';
-                  return DataRow(
-                    cells: [
-                      DataCell(
-                        SizedBox(
-                          width: 170,
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                JsonData.displayName(line,
-                                    fallback: 'Cost line'),
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.w800),
-                              ),
-                              Text(
-                                JsonData.text(line['category'] ?? line['type']),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      DataCell(Text(formatNumber(quantity))),
-                      DataCell(
-                          Text(JsonData.text(line['unit'], fallback: '—'))),
-                      DataCell(Text(formatter.format(rate))),
-                      DataCell(
-                        SizedBox(
-                          width: 235,
-                          child: Text(
-                            [
-                              if (basis.isNotEmpty) 'Basis: $basis',
-                              if (formula.isNotEmpty) 'Formula: $formula',
-                              if (basis.isEmpty && formula.isEmpty)
-                                'Not supplied',
-                            ].join('\n'),
-                          ),
-                        ),
-                      ),
-                      DataCell(
-                        Text(
-                          formatter.format(subtotal),
-                          style: const TextStyle(fontWeight: FontWeight.w800),
-                        ),
-                      ),
-                      DataCell(
-                        StatusPill(
-                          label: override ? 'Override' : 'Calculated',
-                          tone: override
-                              ? Theme.of(context).colorScheme.secondary
-                              : Theme.of(context).colorScheme.tertiary,
-                        ),
-                      ),
-                    ],
-                  );
-                }).toList(),
               ),
-            ),
-          ),
-        if (warnings.isNotEmpty) ...[
-          const SizedBox(height: 14),
-          Text('Estimate warnings',
-              style: Theme.of(context).textTheme.titleSmall),
-          const SizedBox(height: 7),
-          ...warnings.map(
-            (warning) => ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(
-                Icons.warning_amber_outlined,
-                color: Theme.of(context).colorScheme.error,
+            ],
+            if (warnings.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              SectionCard(
+                title: 'Warnings',
+                leading: const Icon(Icons.warning_amber_outlined,
+                    color: Colors.orange),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: warnings.map((w) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(Icons.warning, color: Colors.orange, size: 16),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(w)),
+                      ],
+                    ),
+                  )).toList(),
+                ),
               ),
-              title: Text(warning),
-            ),
-          ),
+            ],
+          ],
         ],
-        const SizedBox(height: 14),
-        const Divider(),
-        const SizedBox(height: 8),
-        _TotalRow(
-          label: 'Subtotal',
-          value: formatter.format(
-            _firstNumber(estimate, const ['subtotal', 'subtotal_cost']),
-          ),
-        ),
-        _TotalRow(
-          label: 'Overhead',
-          value: formatter.format(
-            _firstNumber(estimate, const ['overhead', 'overhead_cost']),
-          ),
-        ),
-        _TotalRow(
-          label: 'Margin',
-          value: formatter.format(
-            _firstNumber(estimate, const ['margin', 'margin_cost']),
-          ),
-        ),
-        _TotalRow(
-          label: 'Contingency',
-          value: formatter.format(
-            _firstNumber(estimate, const ['contingency', 'contingency_cost']),
-          ),
-        ),
-        _TotalRow(
-          label: 'Tax',
-          value: formatter.format(
-            _firstNumber(estimate, const ['tax', 'tax_cost']),
-          ),
-        ),
-        const SizedBox(height: 5),
-        _TotalRow(
-          label: 'TOTAL',
-          value: formatter.format(total),
-          emphasized: true,
-        ),
-      ],
+      ),
     );
   }
 
-  double _firstNumber(JsonMap map, List<String> keys) {
+  double _firstNumber(JsonMap estimate, List<String> keys) {
     for (final key in keys) {
-      final value = map[key];
-      if (value is num) return value.toDouble();
-      if (value is String) {
-        final parsed = double.tryParse(value);
-        if (parsed != null) return parsed;
-      }
+      final v = estimate[key];
+      if (v is num) return v.toDouble();
+      if (v is String) return double.tryParse(v);
     }
-    return 0;
+    return 0.0;
   }
 }
 
-class _TotalRow extends StatelessWidget {
-  const _TotalRow({
+class _PerPieceLine extends StatelessWidget {
+  final String label;
+  final num? value;
+  final IconData icon;
+  final bool isTotal;
+
+  const _PerPieceLine({
     required this.label,
     required this.value,
-    this.emphasized = false,
+    required this.icon,
+    this.isTotal = false,
   });
-
-  final String label;
-  final String value;
-  final bool emphasized;
 
   @override
   Widget build(BuildContext context) {
-    final style = Theme.of(context).textTheme.bodyMedium?.copyWith(
-          fontWeight: emphasized ? FontWeight.w900 : FontWeight.w600,
-          fontSize: emphasized ? 17 : null,
-          color: emphasized ? Theme.of(context).colorScheme.primary : null,
-        );
+    final theme = Theme.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         children: [
-          Expanded(child: Text(label, style: style)),
-          Text(value, style: style),
+          Icon(icon, size: 16, color: theme.colorScheme.onSurfaceVariant),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              label,
+              style: theme.textTheme.bodyMedium,
+            ),
+          ),
+          Text(
+            value == null ? '–' : value.toStringAsFixed(2),
+            style: theme.textTheme.bodyMedium?.copyWith(
+              fontWeight: isTotal ? FontWeight.w700 : FontWeight.normal,
+              color: isTotal ? theme.colorScheme.primary : null,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _QuantitySelector extends StatelessWidget {
+  final int quantity;
+  final num? perPieceCost;
+
+  const _QuantitySelector({
+    required this.quantity,
+    required this.perPieceCost,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final currency = 'INR';
+    final formatter = NumberFormat.simpleCurrency(name: currency);
+    final total = perPieceCost != null ? perPieceCost * quantity : null;
+
+    return SectionCard(
+      title: 'Batch pricing',
+      subtitle: 'Total cost for all parts.',
+      leading: const Icon(Icons.people_outlined),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Quantity',
+                    border: OutlineInputBorder(),
+                  ),
+                  onChanged: (value) {
+                    // Quantity can be updated here
+                  },
+                ),
+              ),
+              const SizedBox(width: 12),
+              Text(
+                'Quantity: $quantity',
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          if (perPieceCost != null)
+            Row(
+              children: [
+                Text(
+                  'Per-part cost: ',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  formatter.format(perPieceCost),
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (total != null)
+              Row(
+                children: [
+                  Text(
+                    'Batch total: ',
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    formatter.format(total),
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                ],
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _LineItemRow extends StatelessWidget {
+  final JsonMap line;
+
+  const _LineItemRow({required this.line});
+
+  @override
+  Widget build(BuildContext context) {
+    final label = JsonData.text(line['label'], fallback: 'Unknown');
+    final quantity = JsonData.number(line['quantity'], fallback: 0);
+    final rate = JsonData.number(line['rate'], fallback: 0);
+    final subtotal = JsonData.number(line['subtotal'], fallback: 0);
+    final isOverride = line['is_override'] == true;
+    final formula = JsonData.text(line['formula'], fallback: '');
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: Theme.of(context).textTheme.bodyMedium,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          Text(
+            quantity.toStringAsFixed(quantity == quantity.toInt() ? 0 : 2),
+            style: Theme.of(context).textTheme.bodyMedium,
+          ),
+          const SizedBox(width: 8),
+          Text(
+            rate == 0 ? '–' : rate.toStringAsFixed(2),
+            style: Theme.of(context).textTheme.bodyMedium,
+          ),
+          const SizedBox(width: 8),
+          Text(
+            subtotal.toStringAsFixed(2),
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          if (isOverride)
+            const SizedBox(width: 8),
+          if (isOverride)
+            const Icon(Icons.edit, size: 14, color: Colors.orange),
+          const SizedBox(width: 8),
+          Text(
+            formula,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
         ],
       ),
     );
