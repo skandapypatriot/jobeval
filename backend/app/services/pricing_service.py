@@ -524,6 +524,54 @@ class PricingService:
                 "Some lines are unpriced because a rate or price is missing; the total is a lower bound until configured."
             )
 
+        # Manufacturing summary for the estimate UI: setup count, orientation
+        # changes, and a simple complexity band based on feature evidence.
+        setups = list(plan.get("setups") or [])
+        setup_count = len(setups)
+        orientations = {str(s.get("orientation", {})) for s in setups if s.get("orientation")}
+        orientation_changes = max(0, len(orientations) - 1)
+        all_features = list((analysis or {}).get("features") or [])
+        confidence_values = [
+            float(f.get("confidence", 0.0)) for f in all_features if f.get("confidence") is not None
+        ]
+        avg_confidence = (
+            sum(confidence_values) / len(confidence_values) if confidence_values else 0.0
+        )
+        if avg_confidence >= 0.8:
+            complexity = "low"
+        elif avg_confidence >= 0.6:
+            complexity = "medium"
+        else:
+            complexity = "high"
+
+        # Per-piece cost and time breakdown
+        machining_minutes = sum(
+            float(op.get("estimated_time_min", 0.0) or 0.0)
+            for op in (plan.get("operations") or [])
+            if op.get("auto_costed")
+        )
+        setup_minutes = float(plan.get("total_setup_time_min", 0.0) or 0.0)
+        inspection_minutes = float(plan.get("total_inspection_time_min", 0.0) or 0.0)
+        total_machining_minutes = machining_minutes + setup_minutes + inspection_minutes
+        total_hours = total_machining_minutes / 60.0
+
+        # Material cost per piece
+        material_weight_kg = stock.get("stock_weight_kg", 0.0)
+        material_price = _number(config.get("price"))
+        if material_price is None:
+            material_price = _number(config.get("price_per_kg"))
+        material_cost_per_piece = (
+            material_weight_kg * material_price if material_price is not None else None
+        )
+
+        # Total machining cost per piece (excluding overhead/margin/contingency/tax)
+        machining_cost_per_piece = sum(
+            float(item["subtotal"])
+            for item in lines
+            if item.get("id") in {"material", "machine", "labor", "setup", "tool_change", "programming", "inspection", "finishing", "deburr"}
+            and item.get("subtotal") is not None
+        ) / charged_quantity if charged_quantity > 0 else None
+
         return {
             "currency": config.get("currency", "USD"),
             "quantity": requested_quantity,
@@ -546,6 +594,15 @@ class PricingService:
                 "complexity": complexity,
                 "average_confidence": round(avg_confidence, 2),
                 "feature_count": len(all_features),
+            },
+            "per_piece": {
+                "machining_minutes": round(total_machining_minutes, 2),
+                "machining_hours": round(total_hours, 3),
+                "material_cost": money(material_cost_per_piece),
+                "machining_cost": money(machining_cost_per_piece),
+                "total_per_piece": money(machining_cost_per_piece)
+                if machining_cost_per_piece is not None
+                else None,
             },
         }
 
