@@ -1,8 +1,14 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:jobeval/core/api/api_client.dart';
+import 'package:jobeval/core/api/api_config.dart';
 import 'package:jobeval/core/models/json_data.dart';
 
-final apiClientProvider = Provider<ApiClient>((ref) => ApiClient());
+final apiConfigProvider = StateProvider<String>((ref) => ApiConfig.baseUrl);
+
+final apiClientProvider = Provider<ApiClient>((ref) {
+  final baseUrl = ref.watch(apiConfigProvider);
+  return ApiClient(baseUrl: baseUrl);
+});
 
 enum BackendState { checking, online, degraded, offline }
 

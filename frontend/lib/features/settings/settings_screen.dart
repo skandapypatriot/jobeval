@@ -1,42 +1,76 @@
 import 'package:flutter/material.dart';
-import 'package:jobeval/core/api/api_client.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:jobeval/core/api/api_config.dart';
 import 'package:jobeval/core/models/json_data.dart';
+import 'package:jobeval/core/providers.dart';
 import 'package:jobeval/shared/widgets/common_widgets.dart';
 import 'package:jobeval/shared/widgets/pricing_editor.dart';
 
-class SettingsScreen extends StatefulWidget {
+class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
 
   @override
-  State<SettingsScreen> createState() => _SettingsScreenState();
+  ConsumerState<SettingsScreen> createState() => _SettingsScreenState();
 }
 
-class _SettingsScreenState extends State<SettingsScreen> {
-  final apiClient = ApiClient();
+class _SettingsScreenState extends ConsumerState<SettingsScreen> {
+  final _baseUrlController = TextEditingController();
   final _openRouterKeyController = TextEditingController();
   final _nvidiaNimKeyController = TextEditingController();
   bool _isSaving = false;
   JsonMap? pricing;
 
   @override
+  void initState() {
+    super.initState();
+    _baseUrlController.text = ApiConfig.baseUrl;
+    _loadPricing();
+  }
+
+  @override
   void dispose() {
+    _baseUrlController.dispose();
     _openRouterKeyController.dispose();
     _nvidiaNimKeyController.dispose();
     super.dispose();
   }
 
-  @override
-  void initState() {
-    super.initState();
-    _loadPricing();
-  }
-
   Future<void> _loadPricing() async {
     try {
-      final p = await apiClient.getGlobalPricing();
+      final p = await ref.read(apiClientProvider).getGlobalPricing();
       if (mounted) setState(() => pricing = p);
     } catch (e) {
       // Ignore load errors
+    }
+  }
+
+  Future<void> _saveBaseUrl() async {
+    final url = _baseUrlController.text.trim();
+    if (url.isEmpty) return;
+    setState(() => _isSaving = true);
+    try {
+      ref.read(apiConfigProvider.notifier).state = url;
+      // Recreate the API client with the new base URL
+      ref.read(apiClientProvider);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('API base URL set to $url'),
+            backgroundColor: Theme.of(context).colorScheme.tertiary,
+          ),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(apiErrorMessage(error)),
+            backgroundColor: Theme.of(context).colorScheme.error,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
     }
   }
 
@@ -50,7 +84,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           PageHeader(
             title: 'JobEval Settings',
             subtitle:
-                'Configure global pricing defaults and optional LLM explanation settings.',
+                'Configure the API endpoint, global pricing defaults, and optional LLM explanation settings.',
             actions: [
               OutlinedButton.icon(
                 onPressed: _loadPricing,
@@ -63,9 +97,52 @@ class _SettingsScreenState extends State<SettingsScreen> {
           SectionCard(
             title: 'API connection',
             subtitle:
-                'The base URL is fixed at build time for reproducible deployments.',
+                'Change the backend base URL at runtime. Changing it reconnects all API calls immediately.',
             leading: const Icon(Icons.api_outlined),
-            child: SelectableText(apiClient.baseUrl),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _baseUrlController,
+                  decoration: const InputDecoration(
+                    labelText: 'API base URL',
+                    hintText: 'http://127.0.0.1:8000/api/v1',
+                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.link),
+                  ),
+                  onSubmitted: (_) => _saveBaseUrl(),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    FilledButton.icon(
+                      onPressed: _isSaving ? null : _saveBaseUrl,
+                      icon: _isSaving
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.save),
+                      label: const Text('Save API URL'),
+                    ),
+                    const SizedBox(width: 12),
+                    OutlinedButton.icon(
+                      onPressed: _isSaving
+                          ? null
+                          : () {
+                              _baseUrlController.text = ApiConfig.baseUrl;
+                              ref.read(apiConfigProvider.notifier).state =
+                                  ApiConfig.baseUrl;
+                            },
+                      icon: const Icon(Icons.restore),
+                      label: const Text('Reset to default'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 16),
           SectionCard(
@@ -135,7 +212,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             final futures = <Future<void>>[];
                             if (openRouterKey.isNotEmpty) {
                               futures.add(
-                                apiClient.saveApiKey(
+                                ref.read(apiClientProvider).saveApiKey(
                                   provider: 'openrouter',
                                   apiKey: openRouterKey,
                                 ),
@@ -143,7 +220,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             }
                             if (nvidiaNimKey.isNotEmpty) {
                               futures.add(
-                                apiClient.saveApiKey(
+                                ref.read(apiClientProvider).saveApiKey(
                                   provider: 'nvidia_nim',
                                   apiKey: nvidiaNimKey,
                                 ),
@@ -203,7 +280,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             saveLabel: 'Save global defaults',
             showQuantity: false,
             onSave: (draft) async {
-              await apiClient.putGlobalPricing(draft.toJson());
+              await ref.read(apiClientProvider).putGlobalPricing(draft.toJson());
               if (mounted) {
                 await _loadPricing();
               }
