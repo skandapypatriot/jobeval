@@ -167,3 +167,91 @@ def test_estimate_quantity_charging():
     estimate = service.calculate(config, {}, plan, 3)
     assert estimate["charged_quantity"] == 3
     assert estimate["quantity"] == 3
+
+
+def test_estimate_snapshot_immutability(client, tmp_path):
+    """A saved estimate snapshot is not affected by later pricing changes."""
+    project_id = client.post("/api/v1/projects", json={"name": "Snapshot"}).json()["id"]
+
+    # Create a STEP file and run analysis
+    step_path = tmp_path / "part.stp"
+    from tests.helpers import write_step_block_with_hole
+    write_step_block_with_hole(step_path)
+    with step_path.open("rb") as stream:
+        upload = client.post(
+            f"/api/v1/projects/{project_id}/files",
+            files={"file": ("part.stp", stream, "application/step")},
+        ).json()
+
+    # Start analysis
+    start = client.post(
+        f"/api/v1/projects/{project_id}/analysis", json={"file_id": upload["id"]}
+    )
+    assert start.status_code == 202, start.text
+
+    # Wait for job to complete (local worker runs synchronously in tests)
+    import time
+    for _ in range(20):
+        job = client.get(f"/api/v1/jobs/{start.json()['job_id']}")
+        if job.json()["status"] == "completed":
+            break
+        time.sleep(0.1)
+
+    # Create initial estimate with low material price
+    estimate1 = client.post(
+        f"/api/v1/projects/{project_id}/estimate",
+        json={
+            "pricing": {
+                "material": "aluminum_6061",
+                "density_kg_m3": 2700.0,
+                "price": 10.0,
+                "price_basis": "kg",
+                "quantity": 1,
+                "rates": {"machine": 60.0},
+            }
+        },
+    )
+    assert estimate1.status_code == 201, estimate1.text
+    total1 = estimate1.json()["total"]
+
+    # Change the material price to a much higher value
+    client.put(
+        f"/api/v1/projects/{project_id}/pricing",
+        json={
+            "material": "aluminum_6061",
+            "density_kg_m3": 2700.0,
+            "price": 9999.0,
+            "price_basis": "kg",
+            "quantity": 1,
+            "rates": {"machine": 60.0},
+        },
+    )
+
+    # Create a new estimate - should reflect the new price
+    estimate2 = client.post(
+        f"/api/v1/projects/{project_id}/estimate",
+        json={
+            "pricing": {
+                "material": "aluminum_6061",
+                "density_kg_m3": 2700.0,
+                "price": 9999.0,
+                "price_basis": "kg",
+                "quantity": 1,
+                "rates": {"machine": 60.0},
+            }
+        },
+    )
+    assert estimate2.status_code == 201, estimate2.text
+    total2 = estimate2.json()["total"]
+    assert total2 > total1, f"New estimate {total2} should exceed old {total1}"
+
+    # Retrieve the first saved estimate - it should still have the old total
+    estimates = client.get(f"/api/v1/projects/{project_id}/estimate")
+    assert estimates.status_code == 200
+    items = estimates.json()["items"]
+    assert len(items) >= 2
+    # Find the first estimate (older one)
+    first_estimate = items[-1]  # ordered by created_at desc, so last is first
+    assert first_estimate["total"] == total1, (
+        f"Saved snapshot {first_estimate['total']} should not change to {total1}"
+    )
