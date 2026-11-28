@@ -129,7 +129,8 @@ class _ProjectUploadScreenState extends ConsumerState<ProjectUploadScreen> {
                     ? const Text('Choose one or more files to continue.')
                     : Column(
                         children: _files.map((file) {
-                          final unreadable = file.path == null &&
+                          final path = kIsWeb ? null : file.path;
+                          final unreadable = path == null &&
                               (file.bytes == null || file.bytes!.isEmpty);
                           return ListTile(
                             contentPadding: EdgeInsets.zero,
@@ -298,7 +299,7 @@ class _ProjectUploadScreenState extends ConsumerState<ProjectUploadScreen> {
               projectId: widget.projectId,
               fileName: file.name,
               role: _role,
-              path: file.path,
+              path: kIsWeb ? null : file.path,
               bytes: file.bytes,
               onProgress: (sent, total) {
                 if (!mounted) return;

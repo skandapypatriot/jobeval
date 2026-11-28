@@ -460,6 +460,12 @@ def get_job(job_id: str, db: Session = Depends(get_db_session)) -> dict[str, Any
     return _job_dict(job)
 
 
+@router.get("/jobs", tags=["Analysis"])
+def list_jobs(db: Session = Depends(get_db_session)) -> dict[str, Any]:
+    jobs = list(db.execute(select(AnalysisJob).order_by(AnalysisJob.created_at.desc())).scalars().all())
+    return {"items": [_job_dict(job) for job in jobs], "jobs": [_job_dict(job) for job in jobs], "total": len(jobs)}
+
+
 @router.post("/jobs/{job_id}/cancel", tags=["Analysis"])
 def cancel_job(job_id: str, db: Session = Depends(get_db_session)) -> dict[str, Any]:
     job = db.get(AnalysisJob, job_id)

@@ -15,25 +15,28 @@ void main() {
         return const MockResponse(200, {
           'currency': 'INR',
           'quantity': 2,
-          'material': {
-            'name': 'Aluminum 6061',
-            'density_kg_m3': 2700,
-            'price': 420,
-            'price_basis': 'per_kg',
+          'material': 'Aluminum 6061',
+          'density_kg_m3': 2700,
+          'price': 420,
+          'price_basis': 'kg',
+          'finished_bbox': {
+            'size': {'x': 100, 'y': 50, 'z': 10},
+            'bbox': {'min': {'x': 0, 'y': 0, 'z': 0}, 'max': {'x': 100, 'y': 50, 'z': 10}},
           },
-          'finished_dimensions_mm': {'x': 100, 'y': 50, 'z': 10},
-          'stock': {'form': 'block', 'x': 104, 'y': 54, 'z': 14},
+          'stock_dimensions': {'x': 104, 'y': 54, 'z': 14},
+          'allowances': {'x': 2, 'y': 2, 'z': 2},
           'rates': {
             'machine': 100,
-            'labour': 80,
+            'labor': 80,
             'setup': 60,
-            'tool': 30,
-            'program': 50,
+            'tool_change': 30,
+            'programming': 50,
             'inspection': 40,
-            'finish': 20,
+            'finishing': 20,
             'deburr': 10,
           },
-          'operation_overrides': <Object>[],
+          'operation_rates': <Object>[],
+          'fixed_overrides': <Object>[],
           'overhead_percent': 10,
           'margin_percent': 5,
           'contingency_percent': 2,
@@ -110,7 +113,7 @@ void main() {
     final savedPricing =
         adapter.requests[putIndex].data as Map<String, dynamic>;
     final rates = savedPricing['rates'] as Map<String, dynamic>;
-    expect(rates['machine_per_hour'], 150);
+    expect(rates['machine'], 150);
 
     expect(find.text('Pricing saved successfully.'), findsOneWidget);
     expect(find.textContaining('1,500'), findsOneWidget);

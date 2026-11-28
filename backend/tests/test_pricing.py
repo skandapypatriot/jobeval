@@ -94,7 +94,9 @@ def test_material_price_missing_is_warning_not_zero():
         {
             "material": "aluminum_6061",
             "density_kg_m3": 2700.0,
-            # price deliberately omitted
+            # price deliberately omitted -> should fall back to None
+            "price": None,
+            "price_per_kg": None,
             "price_basis": "kg",
             "stock_shape": "rectangular",
             "allowances": {"x": 2.0, "y": 2.0, "z": 2.0},
@@ -134,7 +136,7 @@ def test_estimate_rounding_and_totals():
     assert estimate["total"] is not None
     assert estimate["total"] >= 0
     assert estimate["rounding"]["mode"] == "ROUND_HALF_UP"
-    assert estimate["currency"] == "USD"
+    assert estimate["currency"] == "INR"
 
 
 def test_overrides_applied():

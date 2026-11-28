@@ -60,12 +60,15 @@ class PricingDraft {
   });
 
   factory PricingDraft.fromJson(JsonMap json) {
-    final material = JsonData.firstMap(json, const ['material']);
+    final materialValue = json['material'];
+    final materialMap =
+        materialValue is Map ? materialValue : <String, dynamic>{};
     final stock = JsonData.firstMap(json, const ['stock', 'stock_envelope']);
     final finished = JsonData.firstMap(json, const [
       'finished_dimensions',
       'finished_dimensions_mm',
       'part_dimensions',
+      'finished_bbox',
     ]);
     final rates = JsonData.firstMap(json, const ['rates', 'labour_rates']);
     final allowanceValue = json['allowance_per_side_mm'] ??
@@ -73,6 +76,7 @@ class PricingDraft {
         (json['allowance'] is Map ? json['allowance']['per_side'] : null);
     final allowanceMap = JsonData.firstMap(json, const [
       'allowance',
+      'allowances',
       'allowance_mm',
     ]);
     final scalarAllowance = JsonData.number(allowanceValue, fallback: 2);
@@ -83,45 +87,51 @@ class PricingDraft {
       'operation_overrides',
       'operation_rate_overrides',
     ]);
+    final finishedSize = JsonData.firstMap(finished, const ['size']);
 
     return PricingDraft(
       raw: json,
       currency: JsonData.text(json['currency'], fallback: 'INR'),
       quantity: JsonData.integer(json['quantity'] ?? json['qty'], fallback: 1),
       materialName: JsonData.text(
-        material['name'] ?? material['material'] ?? json['material_name'],
+        materialValue is String
+            ? materialValue
+            : materialMap['name'] ??
+                materialMap['material'] ??
+                json['material_name'],
         fallback: 'Aluminum 6061',
       ),
       density: JsonData.number(
-        material['density_kg_m3'] ??
-            material['density'] ??
+        materialMap['density_kg_m3'] ??
+            materialMap['density'] ??
             json['density_kg_m3'],
         fallback: 2700,
       ),
       materialPrice: JsonData.number(
-        material['price'] ??
-            material['price_per_kg'] ??
-            material['rate'] ??
+        materialMap['price'] ??
+            materialMap['price_per_kg'] ??
+            materialMap['rate'] ??
+            json['price'] ??
             json['material_price'],
       ),
-      materialPriceBasis: JsonData.text(
-        material['price_basis'] ??
-            material['basis'] ??
+      materialPriceBasis: _mapPriceBasisFromBackend(
+        materialMap['price_basis'] ??
+            materialMap['basis'] ??
+            json['price_basis'] ??
             json['material_price_basis'],
-        fallback: 'per_kg',
       ),
       stockForm: JsonData.text(
-        stock['form'] ?? stock['shape'] ?? json['stock_form'],
+        stock['form'] ?? stock['shape'] ?? json['stock_shape'],
         fallback: 'block',
       ),
       finishedX: JsonData.number(
-        finished['x'] ?? finished['length'] ?? json['finished_x'],
+        finishedSize['x'] ?? finishedSize['length'] ?? json['finished_x'],
       ),
       finishedY: JsonData.number(
-        finished['y'] ?? finished['width'] ?? json['finished_y'],
+        finishedSize['y'] ?? finishedSize['width'] ?? json['finished_y'],
       ),
       finishedZ: JsonData.number(
-        finished['z'] ?? finished['height'] ?? json['finished_z'],
+        finishedSize['z'] ?? finishedSize['height'] ?? json['finished_z'],
       ),
       stockX: JsonData.number(
         stock['x'] ?? stock['length'] ?? json['stock_x'],
@@ -207,45 +217,92 @@ class PricingDraft {
         ...raw,
         'currency': currency,
         'quantity': quantity,
-        'material': {
-          'name': materialName,
-          'density_kg_m3': density,
-          'price': materialPrice,
-          'price_basis': materialPriceBasis,
-        },
-        'stock': {
-          'form': stockForm,
-          'x': stockX,
-          'y': stockY,
-          'z': stockZ,
-        },
-        'finished_dimensions_mm': {
-          'x': finishedX,
-          'y': finishedY,
-          'z': finishedZ,
-        },
-        'allowance_mm': {
-          'x': allowanceX,
-          'y': allowanceY,
-          'z': allowanceZ,
+        'minimum_quantity': quantity,
+        'material': materialName,
+        'density_kg_m3': density,
+        'price': materialPrice,
+        'price_basis': _mapPriceBasis(materialPriceBasis),
+        'stock_shape': _mapStockForm(stockForm),
+        'stock_dimensions': {'x': stockX, 'y': stockY, 'z': stockZ},
+        'allowances': {'x': allowanceX, 'y': allowanceY, 'z': allowanceZ},
+        'finished_bbox': {
+          'size': {'x': finishedX, 'y': finishedY, 'z': finishedZ},
+          'bbox': {
+            'min': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+            'max': {'x': finishedX, 'y': finishedY, 'z': finishedZ},
+          },
         },
         'rates': {
-          'machine_per_hour': rates['machine'] ?? 0,
-          'labour_per_hour': rates['labour'] ?? 0,
-          'setup_per_hour': rates['setup'] ?? 0,
-          'tool_per_hour': rates['tool'] ?? 0,
-          'program_per_hour': rates['program'] ?? 0,
-          'inspection_per_hour': rates['inspection'] ?? 0,
-          'finish_per_hour': rates['finish'] ?? 0,
-          'deburr_per_hour': rates['deburr'] ?? 0,
+          'machine': rates['machine'] ?? 0,
+          'labor': rates['labour'] ?? 0,
+          'setup': rates['setup'] ?? 0,
+          'tool_change': rates['tool'] ?? 0,
+          'programming': rates['program'] ?? 0,
+          'inspection': rates['inspection'] ?? 0,
+          'finishing': rates['finish'] ?? 0,
+          'deburr': rates['deburr'] ?? 0,
         },
-        'operation_overrides':
-            operationOverrides.map((override) => override.toJson()).toList(),
+        'operation_rates': {
+          for (final override in operationOverrides
+              .where((o) => o.operationId.trim().isNotEmpty && o.rate != 0))
+            override.operationId: override.rate,
+        },
+        'fixed_overrides': {
+          for (final override in operationOverrides
+              .where((o) => o.operationId.trim().isNotEmpty && o.amount != 0))
+            override.operationId: override.amount,
+        },
         'overhead_percent': overheadPercent,
         'margin_percent': marginPercent,
         'contingency_percent': contingencyPercent,
         'tax_percent': taxPercent,
+        'notes': const [],
       };
+
+  static String _mapPriceBasis(String basis) {
+    switch (basis) {
+      case 'per_kg':
+        return 'kg';
+      case 'per_piece':
+        return 'piece';
+      case 'per_volume':
+        return 'volume_cm3';
+      case 'per_area':
+        return 'volume_m3';
+      default:
+        return 'sheet';
+    }
+  }
+
+  static String _mapPriceBasisFromBackend(String? basis) {
+    switch (basis) {
+      case 'kg':
+        return 'per_kg';
+      case 'piece':
+        return 'per_piece';
+      case 'volume_cm3':
+        return 'per_volume';
+      case 'volume_m3':
+        return 'per_area';
+      case 'sheet':
+        return 'per_area';
+      default:
+        return 'per_kg';
+    }
+  }
+
+  static String _mapStockForm(String form) {
+    switch (form.toLowerCase()) {
+      case 'block':
+      case 'rectangular':
+        return 'rectangular';
+      case 'round':
+      case 'round bar':
+        return 'round';
+      default:
+        return 'rectangular';
+    }
+  }
 
   static PricingDraft defaults() {
     return PricingDraft.fromJson(const {

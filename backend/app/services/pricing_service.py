@@ -46,32 +46,35 @@ def _size_from_bbox(bbox: Any) -> dict[str, float]:
 DEFAULT_GLOBAL_PRICING: dict[str, Any] = {
     "material": "aluminum_6061",
     "density_kg_m3": 2700.0,
-    "price": None,
+    "price": 420.0,
+    "price_per_kg": 420.0,
     "price_basis": "kg",
-    "currency": "USD",
+    "currency": "INR",
     "stock_shape": "rectangular",
     "allowances": {"x": 2.0, "y": 2.0, "z": 2.0},
     "allowance_per_side_mm": 2.0,
     "quantity": 1,
     "minimum_quantity": 1,
-    "overhead_percent": 0.0,
-    "margin_percent": 0.0,
-    "contingency_percent": 0.0,
-    "tax_percent": 0.0,
+    "overhead_percent": 10.0,
+    "margin_percent": 15.0,
+    "contingency_percent": 5.0,
+    "tax_percent": 18.0,
     "rates": {
-        "machine": None,
-        "labor": None,
-        "setup": None,
-        "tool_change": None,
-        "programming": None,
-        "inspection": None,
-        "finishing": None,
-        "deburr": None,
+        "machine": 600.0,
+        "labor": 400.0,
+        "setup": 500.0,
+        "tool_change": 150.0,
+        "programming": 300.0,
+        "inspection": 200.0,
+        "finishing": 250.0,
+        "deburr": 100.0,
     },
     "operation_rates": {},
     "fixed_overrides": {},
     "overrides": {},
-    "notes": [],
+    "notes": [
+        "Sample/demo pricing — replace with your shop's actual rates.",
+    ],
 }
 
 
@@ -491,6 +494,34 @@ class PricingService:
         ):
             line(key, label, 1.0, "currency", None, "percent", formula, value)
 
+        # Manufacturing summary for the estimate UI: setup count, orientation
+        # changes, and a simple complexity band based on feature evidence.
+        setups = list(plan.get("setups") or [])
+        setup_count = len(setups)
+        orientations = {
+            str(s.get("orientation", {}))
+            for s in setups
+            if s.get("orientation")
+        }
+        orientation_changes = max(0, len(orientations) - 1)
+        all_features = list((analysis or {}).get("features") or [])
+        confidence_values = [
+            float(f.get("confidence", 0.0))
+            for f in all_features
+            if f.get("confidence") is not None
+        ]
+        avg_confidence = (
+            sum(confidence_values) / len(confidence_values)
+            if confidence_values
+            else 0.0
+        )
+        if avg_confidence >= 0.8:
+            complexity = "low"
+        elif avg_confidence >= 0.6:
+            complexity = "medium"
+        else:
+            complexity = "high"
+
         total = subtotal_before_tax + tax
         if charged_quantity > requested_quantity:
             warnings.append(
@@ -517,6 +548,13 @@ class PricingService:
             "rounding": {"currency_decimals": 2, "mode": "ROUND_HALF_UP"},
             "warnings": warnings,
             "estimated": True,
+            "manufacturing_summary": {
+                "setup_count": setup_count,
+                "orientation_changes": orientation_changes,
+                "complexity": complexity,
+                "average_confidence": round(avg_confidence, 2),
+                "feature_count": len(all_features),
+            },
         }
 
 
