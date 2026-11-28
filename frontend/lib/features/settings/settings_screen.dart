@@ -1,15 +1,47 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:jobeval/core/providers.dart';
+import 'package:jobeval/core/api/api_client.dart';
+import 'package:jobeval/core/models/json_data.dart';
 import 'package:jobeval/shared/widgets/common_widgets.dart';
 import 'package:jobeval/shared/widgets/pricing_editor.dart';
 
-class SettingsScreen extends ConsumerWidget {
+class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final pricing = ref.watch(globalPricingProvider);
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  final apiClient = ApiClient();
+  final _openRouterKeyController = TextEditingController();
+  final _nvidiaNimKeyController = TextEditingController();
+  bool _isSaving = false;
+  JsonMap? pricing;
+
+  @override
+  void dispose() {
+    _openRouterKeyController.dispose();
+    _nvidiaNimKeyController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPricing();
+  }
+
+  Future<void> _loadPricing() async {
+    try {
+      final p = await apiClient.getGlobalPricing();
+      if (mounted) setState(() => pricing = p);
+    } catch (e) {
+      // Ignore load errors
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return ResponsiveBody(
       maxWidth: 1200,
       child: Column(
@@ -21,7 +53,7 @@ class SettingsScreen extends ConsumerWidget {
                 'Configure global pricing defaults and optional LLM explanation settings.',
             actions: [
               OutlinedButton.icon(
-                onPressed: () => ref.invalidate(globalPricingProvider),
+                onPressed: _loadPricing,
                 icon: const Icon(Icons.refresh),
                 label: const Text('Refresh'),
               ),
@@ -33,14 +65,14 @@ class SettingsScreen extends ConsumerWidget {
             subtitle:
                 'The base URL is fixed at build time for reproducible deployments.',
             leading: const Icon(Icons.api_outlined),
-            child: SelectableText(ref.watch(apiClientProvider).baseUrl),
+            child: SelectableText(apiClient.baseUrl),
           ),
           const SizedBox(height: 16),
           SectionCard(
             title: 'LLM explanation provider (optional)',
             subtitle:
                 'LLM explanations are opt-in. Raw CAD files are never sent — only a compact structured summary. '
-                'API keys are configured server-side in .env; this UI selects which provider to use per request.',
+                'Configure your API keys below to enable explanations.',
             leading: const Icon(Icons.api_outlined),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -54,6 +86,20 @@ class SettingsScreen extends ConsumerWidget {
                   ),
                   trailing: const Text('Server-configured'),
                 ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: TextField(
+                    controller: _openRouterKeyController,
+                    obscureText: true,
+                    decoration: const InputDecoration(
+                      labelText: 'OpenRouter API Key',
+                      hintText: 'sk-or-...',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.vpn_key),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
                 ListTile(
                   leading: const Icon(Icons.radio_button_off, size: 20),
                   title: const Text('NVIDIA NIM'),
@@ -61,6 +107,83 @@ class SettingsScreen extends ConsumerWidget {
                     'Provider: integrate.api.nvidia.com · Model: nemotron-3.5',
                   ),
                   trailing: const Text('Server-configured'),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: TextField(
+                    controller: _nvidiaNimKeyController,
+                    obscureText: true,
+                    decoration: const InputDecoration(
+                      labelText: 'NVIDIA NIM API Key',
+                      hintText: 'nvapi-...',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.vpn_key),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  onPressed: _isSaving
+                      ? null
+                      : () async {
+                          setState(() => _isSaving = true);
+                          final openRouterKey =
+                              _openRouterKeyController.text.trim();
+                          final nvidiaNimKey =
+                              _nvidiaNimKeyController.text.trim();
+                          try {
+                            final futures = <Future<void>>[];
+                            if (openRouterKey.isNotEmpty) {
+                              futures.add(
+                                apiClient.saveApiKey(
+                                  provider: 'openrouter',
+                                  apiKey: openRouterKey,
+                                ),
+                              );
+                            }
+                            if (nvidiaNimKey.isNotEmpty) {
+                              futures.add(
+                                apiClient.saveApiKey(
+                                  provider: 'nvidia_nim',
+                                  apiKey: nvidiaNimKey,
+                                ),
+                              );
+                            }
+                            await Future.wait(futures);
+                            if (mounted) {
+                              setState(() => _isSaving = false);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: const Text(
+                                      'API key(s) saved successfully'),
+                                  backgroundColor: Theme.of(context)
+                                      .colorScheme
+                                      .tertiary,
+                                ),
+                              );
+                            }
+                          } catch (error) {
+                            if (mounted) {
+                              setState(() => _isSaving = false);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(apiErrorMessage(error)),
+                                  backgroundColor: Theme.of(context)
+                                      .colorScheme
+                                      .error,
+                                ),
+                              );
+                            }
+                          }
+                        },
+                  icon: _isSaving
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.save),
+                  label: const Text('Save API Keys'),
                 ),
                 const Divider(height: 24),
                 ListTile(
@@ -75,27 +198,16 @@ class SettingsScreen extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: 16),
-          pricing.when(
-            loading: () => const SizedBox(
-              height: 340,
-              child: LoadingPanel(label: 'Loading global pricing defaults…'),
-            ),
-            error: (error, _) => ErrorPanel(
-              title: 'Global pricing defaults could not be loaded',
-              message: apiErrorMessage(error),
-              onRetry: () => ref.invalidate(globalPricingProvider),
-            ),
-            data: (data) => PricingEditor(
-              initialPricing: data,
-              saveLabel: 'Save global defaults',
-              showQuantity: false,
-              onSave: (draft) async {
-                await ref
-                    .read(apiClientProvider)
-                    .putGlobalPricing(draft.toJson());
-                ref.invalidate(globalPricingProvider);
-              },
-            ),
+          PricingEditor(
+            initialPricing: pricing ?? {},
+            saveLabel: 'Save global defaults',
+            showQuantity: false,
+            onSave: (draft) async {
+              await apiClient.putGlobalPricing(draft.toJson());
+              if (mounted) {
+                await _loadPricing();
+              }
+            },
           ),
         ],
       ),

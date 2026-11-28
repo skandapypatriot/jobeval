@@ -96,7 +96,8 @@ class ProjectOverviewScreen extends ConsumerWidget {
                           icon: Icons.folder_copy_outlined,
                           title: 'Files',
                           description: 'Review roles and processing status.',
-                          onTap: () => context.go('/projects/$projectId/files'),
+                          onTap: () =>
+                              context.go('/projects/$projectId/files'),
                         ),
                         _WorkflowAction(
                           icon: Icons.architecture_outlined,

@@ -38,6 +38,7 @@ from app.models.jobeval import (
     CostEstimate,
     CrossValidation,
     DrawingAnalysis,
+    LLMProviderKey,
     ManufacturingPlan,
     PricingConfig,
     Project,
@@ -911,6 +912,32 @@ def create_estimate(
     config = pricing_service.get_project_config(project_id)
     if request.pricing is not None:
         config = _pricing_payload(request.pricing, config)
+    
+    # Auto-populate finished dimensions from CAD geometry if not provided
+    geometry = analysis_row.data.get("geometry") or analysis_row.data.get("geometry_summary") or {}
+    bbox = geometry.get("bbox") or {}
+    low, high = bbox.get("min", {}), bbox.get("max", {})
+    finished_size = {
+        "x": float(high.get("x", 0) - low.get("x", 0)),
+        "y": float(high.get("y", 0) - low.get("y", 0)),
+        "z": float(high.get("z", 0) - low.get("z", 0)),
+    }
+    
+    # Auto-set finished dimensions and stock allowance from model
+    if not config.get("finished_bbox"):
+        config["finished_bbox"] = {
+            "size": finished_size,
+            "bbox": {"min": low, "max": high},
+        }
+    # Auto-calculate stock dimensions from finished + allowance
+    if not config.get("stock_dimensions"):
+        allowances = config.get("allowances", {"x": 2.0, "y": 2.0, "z": 2.0})
+        config["stock_dimensions"] = {
+            "x": finished_size["x"] + 2 * allowances.get("x", 2.0),
+            "y": finished_size["y"] + 2 * allowances.get("y", 2.0),
+            "z": finished_size["z"] + 2 * allowances.get("z", 2.0),
+        }
+    
     estimate = pricing_service.calculate(config, analysis_row.data, plan_row.data, request.quantity)
     estimate["project_id"] = project_id
     estimate["immutable"] = True
@@ -1030,12 +1057,26 @@ async def explain_project(
             detail="LLM explanations are disabled on this server",
         )
 
-    # Select the correct API key based on provider
+    # Select the correct API key: stored in DB > env var
     if provider == "nvidia_nim":
-        api_key = settings.NVIDIA_NIM_API_KEY
+        api_key_row = (
+            db.execute(
+                select(LLMProviderKey).where(LLMProviderKey.provider == "nvidia_nim")
+            )
+            .scalars()
+            .first()
+        )
+        api_key = api_key_row.api_key if api_key_row else settings.NVIDIA_NIM_API_KEY
         provider_name = "NVIDIA NIM"
     else:
-        api_key = settings.OPENROUTER_API_KEY
+        api_key_row = (
+            db.execute(
+                select(LLMProviderKey).where(LLMProviderKey.provider == "openrouter")
+            )
+            .scalars()
+            .first()
+        )
+        api_key = api_key_row.api_key if api_key_row else settings.OPENROUTER_API_KEY
         provider_name = "OpenRouter"
 
     if not api_key:
@@ -1076,22 +1117,18 @@ async def explain_project(
     if request.provider:
         llm.provider = request.provider
         if request.provider == "nvidia_nim":
-            llm.api_key = settings.NVIDIA_NIM_API_KEY
+            llm.api_key = api_key
             llm.base_url = settings.NVIDIA_NIM_BASE_URL
             llm.model = settings.NVIDIA_NIM_MODEL
             llm.timeout = settings.NVIDIA_NIM_TIMEOUT
         else:
-            llm.api_key = settings.OPENROUTER_API_KEY
+            llm.api_key = api_key
             llm.base_url = settings.OPENROUTER_BASE_URL
             llm.model = settings.OPENROUTER_MODEL
             llm.timeout = settings.OPENROUTER_TIMEOUT
-
-    try:
-        result = await llm.complete(system_prompt, user_prompt)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"LLM request failed: {exc}") from exc
-    finally:
-        await llm.close()
+    else:
+        # Use the API key found above
+        llm.api_key = api_key
 
     return {
         "project_id": project_id,
@@ -1100,6 +1137,50 @@ async def explain_project(
         "cad_sent": False,
         "provider": provider,
         "provider_name": provider_name,
+    }
+
+
+@router.post("/api/llm/api-key", tags=["LLM"])
+async def save_llm_api_key(
+    request: dict[str, str],
+    db: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Save an LLM provider API key."""
+    provider = request.get("provider")
+    api_key = request.get("api_key")
+
+    if not provider or not api_key:
+        raise HTTPException(
+            status_code=400, detail="provider and api_key are required"
+        )
+
+    if provider not in ("openrouter", "nvidia_nim"):
+        raise HTTPException(
+            status_code=400, detail="provider must be 'openrouter' or 'nvidia_nim'"
+        )
+
+    existing = (
+        db.execute(select(LLMProviderKey).where(LLMProviderKey.provider == provider))
+        .scalars()
+        .first()
+    )
+
+    if existing:
+        existing.api_key = api_key
+        existing.updated_at = utcnow()
+    else:
+        existing = LLMProviderKey(
+            id=str(uuid.uuid4()),
+            provider=provider,
+            api_key=api_key,
+        )
+        db.add(existing)
+
+    db.flush()
+
+    return {
+        "provider": provider,
+        "message": f"{provider} API key saved successfully",
     }
 
 

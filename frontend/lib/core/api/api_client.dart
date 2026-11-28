@@ -382,6 +382,22 @@ class ApiClient {
     );
   }
 
+  Future<JsonMap> saveApiKey({
+    required String provider,
+    required String apiKey,
+  }) {
+    return _requestMap(
+      () => _dio.post<dynamic>(
+        '/api/llm/api-key',
+        data: {
+          'provider': provider,
+          'api_key': apiKey,
+        },
+      ),
+      action: 'Save API key',
+    );
+  }
+
   Future<JsonMap> _requestMap(
     Future<Response<dynamic>> Function() request, {
     required String action,
