@@ -368,6 +368,20 @@ class ApiClient {
     );
   }
 
+  Future<JsonMap> ocrExtractText({
+    required String imagePath,
+  }) {
+    return _requestMap(
+      () => _dio.post<dynamic>(
+        '/ocr/extract',
+        data: {
+          'image_path': imagePath,
+        },
+      ),
+      action: 'OCR extract text',
+    );
+  }
+
   Future<JsonMap> _requestMap(
     Future<Response<dynamic>> Function() request, {
     required String action,

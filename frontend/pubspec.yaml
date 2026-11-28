@@ -28,6 +28,9 @@ dependencies:
   url_launcher: ^6.2.5
   cupertino_icons: ^1.0.8
 
+  # OCR (ML Kit - mobile only, web falls back to backend OCR)
+  google_ml_kit: ^0.13.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
