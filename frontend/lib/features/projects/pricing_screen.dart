@@ -27,21 +27,20 @@ class _PricingScreenState extends ConsumerState<PricingScreen> {
     final currentEstimate = _estimateOverride ?? estimate.valueOrNull;
 
     // Automatic dimension detection: prefer saved estimate, then CAD analysis geometry.
+    final analysisData = analysis.valueOrNull;
     final finishedBBox = currentEstimate != null
         ? JsonData.firstMap(currentEstimate, const [
             'finished_bbox',
             'finished_dimensions',
             'finished_dimensions_mm',
           ])
-        : analysis.when(
-            data: (data) => JsonData.firstMap(data, const [
-              'finished_bbox',
-              'geometry_summary',
-              'geometry',
-            ]),
-            loading: () => <String, dynamic>{},
-            error: (_, __) => <String, dynamic>{},
-          );
+        : analysisData != null
+            ? JsonData.firstMap(analysisData, const [
+                'finished_bbox',
+                'geometry_summary',
+                'geometry',
+              ])
+            : <String, dynamic>{};
     final finishedSize = finishedBBox['size'] as Map? ?? {};
     final finishedX = (finishedSize['x'] as num?)?.toDouble() ?? 0.0;
     final finishedY = (finishedSize['y'] as num?)?.toDouble() ?? 0.0;
@@ -96,6 +95,10 @@ class _PricingScreenState extends ConsumerState<PricingScreen> {
         ? (stockSize['z'] as num?)?.toDouble() ?? 0.0
         : effectiveFinishedZ + 2 * allowanceZ;
 
+    final hasDimensions = effectiveFinishedX > 0 ||
+        effectiveFinishedY > 0 ||
+        effectiveFinishedZ > 0;
+
     return ResponsiveBody(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -109,18 +112,34 @@ class _PricingScreenState extends ConsumerState<PricingScreen> {
                 onPressed: () {
                   ref.invalidate(projectPricingProvider(widget.projectId));
                   ref.invalidate(estimateProvider(widget.projectId));
+                  ref.invalidate(analysisProvider(widget.projectId));
                 },
                 icon: const Icon(Icons.refresh),
                 label: const Text('Refresh'),
               ),
               const SizedBox(width: 8),
-              FilledButton.icon(
-                onPressed: currentEstimate == null || estimate.isLoading
-                    ? null
-                    : _autoCalculateEstimate,
-                icon: const Icon(Icons.calculate),
-                label: const Text('Auto-calculate estimate'),
-              ),
+              if (currentEstimate != null && !estimate.isLoading)
+                FilledButton.icon(
+                  onPressed: _autoCalculateEstimate,
+                  icon: const Icon(Icons.calculate),
+                  label: const Text('Auto-calculate estimate'),
+                ),
+              if (!hasDimensions && currentEstimate == null)
+                FilledButton.icon(
+                  onPressed: analysis.isLoading ? null : _runAnalysis,
+                  icon: analysis.isLoading
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.analytics),
+                  label: Text(
+                    analysis.isLoading
+                        ? 'Running CAD analysis…'
+                        : 'Run CAD analysis',
+                  ),
+                ),
             ],
           ),
           const SizedBox(height: 20),
@@ -173,6 +192,16 @@ class _PricingScreenState extends ConsumerState<PricingScreen> {
                   z: allowanceZ,
                   label: 'Per side',
                 ),
+                if (!hasDimensions && currentEstimate == null) ...[
+                  const SizedBox(height: 12),
+                  InfoPanel(
+                    title: 'No CAD analysis found',
+                    message:
+                        'Upload a STEP model and run CAD analysis to automatically detect part dimensions. '
+                        'Dimensions and stock envelope will be populated from the model bounding box.',
+                    icon: Icons.info_outline,
+                  ),
+                ],
               ],
             ),
           ),
@@ -249,6 +278,30 @@ class _PricingScreenState extends ConsumerState<PricingScreen> {
     ref.invalidate(estimateProvider(widget.projectId));
     if (mounted) {
       setState(() => _estimateOverride = estimate);
+    }
+  }
+
+  Future<void> _runAnalysis() async {
+    try {
+      await ref.read(apiClientProvider).startAnalysis(widget.projectId);
+      ref.invalidate(analysisProvider(widget.projectId));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('CAD analysis started. Dimensions will appear when complete.'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(apiErrorMessage(error)),
+            backgroundColor: Theme.of(context).colorScheme.error,
+          ),
+        );
+      }
     }
   }
 }
@@ -670,6 +723,58 @@ class _TotalBreakdownRow extends StatelessWidget {
             formatter.format(number),
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
               fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class InfoPanel extends StatelessWidget {
+  final String title;
+  final String message;
+  final IconData icon;
+
+  const InfoPanel({
+    super.key,
+    required this.title,
+    required this.message,
+    this.icon = Icons.info_outline,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: Theme.of(context).colorScheme.onSurfaceVariant, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  message,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
             ),
           ),
         ],
